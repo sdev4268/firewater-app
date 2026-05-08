@@ -1,0 +1,29 @@
+{
+  "name": "firewater-backend",
+  "version": "1.0.0",
+  "description": "Firewater Design Basis Tool — Backend API",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon index.js",
+    "start": "node index.js",
+    "seed": "node prisma/seed.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.14.0",
+    "bcrypt": "^6.0.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "docx": "^9.6.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.3",
+    "prisma": "^5.14.0"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  }
+}

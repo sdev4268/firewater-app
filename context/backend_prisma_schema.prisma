@@ -1,0 +1,300 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  ENGINEER
+}
+
+enum VisibilityRule {
+  ALWAYS
+  PROJECT_TYPE
+  USER_TOGGLE
+}
+
+enum ValueType {
+  FIXED
+  DROPDOWN
+  MANUAL
+  CALCULATED
+  MULTI_SELECT
+}
+
+enum SnoFormat {
+  numeric
+  alpha_lower
+  alpha_upper
+}
+
+enum ContentItemType {
+  FIXED
+  CHECKBOX
+  DROPDOWN
+  ADDABLE
+}
+
+enum ChangeType {
+  ADDED
+  MODIFIED
+  DELETED
+}
+
+// ─── USERS ───────────────────────────────────────────────────────────────────
+
+model User {
+  id           Int       @id @default(autoincrement())
+  employeeId   String    @unique
+  name         String
+  passwordHash String
+  role         Role      @default(ENGINEER)
+  createdAt    DateTime  @default(now())
+  projects     Project[]
+}
+
+// ─── PROJECT TYPES ───────────────────────────────────────────────────────────
+
+model ProjectType {
+  id             Int             @id @default(autoincrement())
+  code           String          @unique // REFINERY | PETROCHEMICAL | LNG | PIPELINE | TANKFARM | UTILITY
+  name           String
+  description    String?
+  sortOrder      Int             @default(0)
+  projects       Project[]
+  fieldOverrides FieldOverride[]
+}
+
+// ─── SECTIONS ────────────────────────────────────────────────────────────────
+
+model Section {
+  id                    Int                    @id @default(autoincrement())
+  parentId              Int?
+  parent                Section?               @relation("SectionChildren", fields: [parentId], references: [id])
+  children              Section[]              @relation("SectionChildren")
+  orderIndex            Int                    @default(0)
+  numberHint            String? // e.g. "4.2.2" — reference only, computed live
+  titleTemplate         String
+  contentTemplate       String?
+  visibilityRule        VisibilityRule         @default(ALWAYS)
+  projectTypesWhitelist Json?
+  isHeadingOnly         Boolean                @default(false)
+  notes                 String?
+  fields                Field[]
+  sectionTables         SectionTable[]
+  contentItems          SectionContentItem[]
+  toggles               ProjectSectionToggle[]
+}
+
+// ─── FIELDS ──────────────────────────────────────────────────────────────────
+
+model Field {
+  id              Int                 @id @default(autoincrement())
+  sectionId       Int
+  section         Section             @relation(fields: [sectionId], references: [id])
+  fieldKey        String
+  label           String
+  valueType       ValueType
+  fixedValue      String?
+  dropdownOptions Json?
+  defaultValue    String?
+  units           String?
+  placeholderTag  String?
+  mandatory       Boolean             @default(false)
+  overrides       FieldOverride[]
+  projectValues   ProjectFieldValue[]
+}
+
+model FieldOverride {
+  id              Int         @id @default(autoincrement())
+  fieldId         Int
+  field           Field       @relation(fields: [fieldId], references: [id])
+  projectTypeCode String
+  projectType     ProjectType @relation(fields: [projectTypeCode], references: [code])
+  overrideValue   String
+}
+
+// ─── PROJECTS ────────────────────────────────────────────────────────────────
+
+model Project {
+  id                   Int                      @id @default(autoincrement())
+  name                 String
+  projectTypeId        Int
+  projectType          ProjectType              @relation(fields: [projectTypeId], references: [id])
+  documentNumber       String?
+  revision             String                   @default("0")
+  owner                String?
+  consultant           String?
+  jobNumber            String?
+  facilityName         String?
+  location             String?
+  // ── Revision tracking ────────────────────────────────────────────────────
+  // Null = tracking OFF. Set to a revisionCode string to auto-mark changes.
+  activeRevisionCode   String?
+  // ─────────────────────────────────────────────────────────────────────────
+  createdById          Int
+  createdBy            User                     @relation(fields: [createdById], references: [id])
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  fieldValues          ProjectFieldValue[]
+  sectionToggles       ProjectSectionToggle[]
+  tableRows            ProjectTableRow[]
+  seedRowSelections    ProjectSeedRowSelection[]
+  contentSelections    ProjectContentSelection[]
+  revisions            RevisionHistory[]
+  clauseMarks          ClauseRevisionMark[]
+  generationLogs       GenerationLog[]
+}
+
+model ProjectFieldValue {
+  id        Int     @id @default(autoincrement())
+  projectId Int
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fieldId   Int
+  field     Field   @relation(fields: [fieldId], references: [id])
+  value     String
+
+  @@unique([projectId, fieldId])
+}
+
+model ProjectSectionToggle {
+  id        Int     @id @default(autoincrement())
+  projectId Int
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sectionId Int
+  section   Section @relation(fields: [sectionId], references: [id])
+  isEnabled Boolean @default(true)
+
+  @@unique([projectId, sectionId])
+}
+
+// ─── SECTION TABLES ──────────────────────────────────────────────────────────
+
+model SectionTable {
+  id                   Int               @id @default(autoincrement())
+  sectionId            Int
+  section              Section           @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  tableKey             String
+  label                String
+  columns              Json              @default("[]")
+  sortOrder            Int               @default(0)
+  snoFormat            SnoFormat         @default(numeric)
+  canAddRows           Boolean           @default(true)
+  canDeleteRows        Boolean           @default(true)
+  canReorderRows       Boolean           @default(false)
+  canSelectDeselect    Boolean           @default(true)
+  hasTextBody          Boolean           @default(false)
+  cellSupportsDropdown Boolean           @default(false)
+  seedRows             SectionTableRow[]
+  projectRows          ProjectTableRow[]
+
+  @@unique([sectionId, tableKey])
+}
+
+model SectionTableRow {
+  id               Int                      @id @default(autoincrement())
+  tableId          Int
+  table            SectionTable             @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  rowData          Json                     @default("{}")
+  isSeed           Boolean                  @default(true)
+  isMandatory      Boolean                  @default(false)
+  isCheckedDefault Boolean                  @default(true)
+  sortOrder        Int                      @default(0)
+  selections       ProjectSeedRowSelection[]
+}
+
+model ProjectTableRow {
+  id        Int          @id @default(autoincrement())
+  projectId Int
+  project   Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tableId   Int
+  table     SectionTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  rowData   Json         @default("{}")
+  sortOrder Int          @default(0)
+}
+
+model ProjectSeedRowSelection {
+  id         Int             @id @default(autoincrement())
+  projectId  Int
+  project    Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rowId      Int
+  row        SectionTableRow @relation(fields: [rowId], references: [id], onDelete: Cascade)
+  isSelected Boolean         @default(true)
+
+  @@unique([projectId, rowId])
+}
+
+// ─── SECTION CONTENT ITEMS ───────────────────────────────────────────────────
+
+model SectionContentItem {
+  id         Int                      @id @default(autoincrement())
+  sectionId  Int
+  section    Section                  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  sortOrder  Int                      @default(0)
+  itemType   ContentItemType          @default(FIXED)
+  label      String
+  bodyText   String?
+  options    Json?
+  defaultOn  Boolean                  @default(true)
+  notes      String?
+  selections ProjectContentSelection[]
+}
+
+model ProjectContentSelection {
+  id           Int                @id @default(autoincrement())
+  projectId    Int
+  project      Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  itemId       Int
+  item         SectionContentItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  isSelected   Boolean            @default(true)
+  chosenOption String?
+
+  @@unique([projectId, itemId])
+}
+
+// ─── REVISION TRACKING ───────────────────────────────────────────────────────
+
+model RevisionHistory {
+  id           Int      @id @default(autoincrement())
+  projectId    Int
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  revisionCode String
+  revisionDate String
+  purpose      String?
+  preparedBy   String?
+  checkedBy    String?
+  approvedBy   String?
+  createdAt    DateTime @default(now())
+
+  @@unique([projectId, revisionCode])
+}
+
+model ClauseRevisionMark {
+  id           Int        @id @default(autoincrement())
+  projectId    Int
+  project      Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sectionId    Int?
+  fieldId      Int?
+  revisionCode String
+  changeType   ChangeType
+  changeNote   String?
+  createdAt    DateTime   @default(now())
+}
+
+// ─── GENERATION LOG ──────────────────────────────────────────────────────────
+
+model GenerationLog {
+  id          Int      @id @default(autoincrement())
+  projectId   Int
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  generatedAt DateTime @default(now())
+  outputPath  String?
+  revision    String?
+  generatedBy String?
+}
