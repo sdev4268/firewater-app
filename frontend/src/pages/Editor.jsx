@@ -5,7 +5,7 @@ import RevisionManager from './RevisionManager'; // Phase 7
 import CompilerPanel from './CompilerPanel';      // Phase 8
 
 // ─── Generate API helper (raw fetch — needs blob response, not JSON) ──────────
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 // Sentinel error class so the caller can distinguish a 422 from a real failure
 class ValidationError extends Error {
