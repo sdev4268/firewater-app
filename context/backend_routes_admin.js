@@ -206,7 +206,7 @@ router.get('/stats', requireAdmin, async (req, res) => {
 // DEV MODE — SECTION CONFIG (Option A: safe metadata only)
 // ══════════════════════════════════════════════════════════════════════════════
 
-// GET /api/admin/sections — flat list of all sections with their fields, tables, and content items
+// GET /api/admin/sections — flat list of all sections with their fields
 router.get('/sections', requireAdmin, async (req, res) => {
   try {
     const sections = await prisma.section.findMany({
@@ -227,14 +227,8 @@ router.get('/sections', requireAdmin, async (req, res) => {
             mandatory:      true,
           },
         },
-        sectionTables: {
-          orderBy: { sortOrder: 'asc' },
-          include: {
-            seedRows: { orderBy: { sortOrder: 'asc' } },
-          },
-        },
-        contentItems: {
-          orderBy: { sortOrder: 'asc' },
+        _count: {
+          select: { sectionTables: true, contentItems: true },
         },
       },
     });
@@ -413,95 +407,6 @@ router.delete('/fields/:id', requireAdmin, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SEED ROW MANAGEMENT (Dev Mode)
-// ══════════════════════════════════════════════════════════════════════════════
-
-// POST /api/admin/tables/:tableId/seedrows — add a new seed row
-// Body: { rowData, isCheckedDefault?, isMandatory?, sortOrder? }
-router.post('/tables/:tableId/seedrows', requireAdmin, async (req, res) => {
-  const tableId = parseInt(req.params.tableId);
-  if (isNaN(tableId)) return res.status(400).json({ error: 'Invalid tableId' });
-
-  const { rowData = {}, isCheckedDefault = true, isMandatory = false, sortOrder } = req.body;
-
-  try {
-    const table = await prisma.sectionTable.findUnique({ where: { id: tableId } });
-    if (!table) return res.status(404).json({ error: 'Table not found' });
-
-    // Auto-assign sortOrder if not provided
-    const maxSort = await prisma.sectionTableRow.aggregate({
-      where: { tableId },
-      _max: { sortOrder: true },
-    });
-    const nextSort = sortOrder ?? ((maxSort._max.sortOrder ?? -1) + 1);
-
-    const row = await prisma.sectionTableRow.create({
-      data: {
-        tableId,
-        rowData,
-        isSeed:           true,
-        isCheckedDefault,
-        isMandatory,
-        sortOrder:        nextSort,
-      },
-    });
-    res.status(201).json({ row });
-  } catch (err) {
-    console.error('POST /admin/tables/:tableId/seedrows error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// PUT /api/admin/seedrows/:rowId — update a seed row's data or checked default
-// Body: { rowData?, isCheckedDefault?, isMandatory?, sortOrder? }
-router.put('/seedrows/:rowId', requireAdmin, async (req, res) => {
-  const rowId = parseInt(req.params.rowId);
-  if (isNaN(rowId)) return res.status(400).json({ error: 'Invalid rowId' });
-
-  const { rowData, isCheckedDefault, isMandatory, sortOrder } = req.body;
-
-  try {
-    const existing = await prisma.sectionTableRow.findUnique({ where: { id: rowId } });
-    if (!existing) return res.status(404).json({ error: 'Seed row not found' });
-
-    const updateData = {};
-    if (rowData           !== undefined) updateData.rowData           = rowData;
-    if (isCheckedDefault  !== undefined) updateData.isCheckedDefault  = Boolean(isCheckedDefault);
-    if (isMandatory       !== undefined) updateData.isMandatory       = Boolean(isMandatory);
-    if (sortOrder         !== undefined) updateData.sortOrder         = sortOrder;
-
-    const row = await prisma.sectionTableRow.update({
-      where: { id: rowId },
-      data:  updateData,
-    });
-    res.json({ row });
-  } catch (err) {
-    console.error('PUT /admin/seedrows/:rowId error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// DELETE /api/admin/seedrows/:rowId — delete a seed row
-router.delete('/seedrows/:rowId', requireAdmin, async (req, res) => {
-  const rowId = parseInt(req.params.rowId);
-  if (isNaN(rowId)) return res.status(400).json({ error: 'Invalid rowId' });
-
-  try {
-    const existing = await prisma.sectionTableRow.findUnique({ where: { id: rowId } });
-    if (!existing) return res.status(404).json({ error: 'Seed row not found' });
-
-    // Delete per-project selections first (FK constraint)
-    await prisma.projectSeedRowSelection.deleteMany({ where: { rowId } });
-    await prisma.sectionTableRow.delete({ where: { id: rowId } });
-
-    res.json({ deleted: true, id: rowId });
-  } catch (err) {
-    console.error('DELETE /admin/seedrows/:rowId error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// ══════════════════════════════════════════════════════════════════════════════
 // GENERATION LOG
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -532,6 +437,99 @@ router.get('/generation-logs', requireAdmin, async (req, res) => {
     });
   } catch (err) {
     console.error('GET /admin/generation-logs error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STANDARDS REFERENCE — Admin CRUD
+// Manage engineering standards excerpts mapped to sections.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/admin/standards — list all standards (optionally filter by ?hint=)
+router.get('/standards', requireAdmin, async (req, res) => {
+  try {
+    const where = req.query.hint ? { sectionNumberHint: req.query.hint } : {};
+    const standards = await prisma.sectionStandard.findMany({
+      where,
+      orderBy: [{ sectionNumberHint: 'asc' }, { sortOrder: 'asc' }],
+    });
+    res.json({ standards });
+  } catch (err) {
+    console.error('GET /admin/standards error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/admin/standards — create a new standard entry
+// Body: { sectionNumberHint, standardCode, clause?, title, body, sortOrder? }
+router.post('/standards', requireAdmin, async (req, res) => {
+  const { sectionNumberHint, standardCode, clause, title, body, sortOrder } = req.body;
+  if (!sectionNumberHint || !standardCode || !title || !body) {
+    return res.status(400).json({ error: 'sectionNumberHint, standardCode, title, body are required' });
+  }
+
+  try {
+    const created = await prisma.sectionStandard.create({
+      data: {
+        sectionNumberHint,
+        standardCode,
+        clause:    clause    ?? null,
+        title,
+        body,
+        sortOrder: sortOrder ?? 0,
+      },
+    });
+    res.status(201).json({ standard: created });
+  } catch (err) {
+    console.error('POST /admin/standards error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/admin/standards/:id — update a standard entry
+router.put('/standards/:id', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid standard id' });
+
+  try {
+    const existing = await prisma.sectionStandard.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Standard not found' });
+
+    const { sectionNumberHint, standardCode, clause, title, body, sortOrder } = req.body;
+
+    const updated = await prisma.sectionStandard.update({
+      where: { id },
+      data: {
+        ...(sectionNumberHint !== undefined && { sectionNumberHint }),
+        ...(standardCode      !== undefined && { standardCode }),
+        ...(clause            !== undefined && { clause }),
+        ...(title             !== undefined && { title }),
+        ...(body              !== undefined && { body }),
+        ...(sortOrder         !== undefined && { sortOrder }),
+      },
+    });
+
+    res.json({ standard: updated });
+  } catch (err) {
+    console.error('PUT /admin/standards/:id error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/admin/standards/:id — delete a standard entry
+router.delete('/standards/:id', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid standard id' });
+
+  try {
+    const existing = await prisma.sectionStandard.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Standard not found' });
+
+    await prisma.sectionStandard.delete({ where: { id } });
+    res.json({ deleted: true, id });
+  } catch (err) {
+    console.error('DELETE /admin/standards/:id error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

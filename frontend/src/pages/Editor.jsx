@@ -1,34 +1,27 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { projects as projectsApi, sections as sectionsApi, fields as fieldsApi, revisions as revisionsApi } from '../api/client';
-import RevisionManager from './RevisionManager'; // Phase 7
-import CompilerPanel from './CompilerPanel';      // Phase 8
+import {
+  projects as projectsApi,
+  sections as sectionsApi,
+  fields   as fieldsApi,
+  revisions as revisionsApi,
+  reviews  as reviewsApi,
+  standards as standardsApi,
+} from '../api/client';
+import RevisionManager from './RevisionManager';
+import CompilerPanel   from './CompilerPanel';
 
-// ─── Generate API helper (raw fetch — needs blob response, not JSON) ──────────
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-// Sentinel error class so the caller can distinguish a 422 from a real failure
-class ValidationError extends Error {
-  constructor(missingFields) {
-    super('validation');
-    this.missingFields = missingFields;
-  }
-}
-
-async function generateDocument(projectId, fmt = 'docx', force = false) {
+// ─── Generate (raw fetch — needs blob response) ───────────────────────────────
+const API_BASE = '/api';
+async function generateDocument(projectId, fmt = 'docx') {
   const token = localStorage.getItem('fw_token');
-  const url   = `${API_BASE}/generate/${projectId}?fmt=${fmt}${force ? '&force=1' : ''}`;
-  const res   = await fetch(url, {
-    method: 'POST',
+  const res = await fetch(`${API_BASE}/generate/${projectId}?fmt=${fmt}`, {
+    method:  'POST',
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
   });
   if (!res.ok) {
-    if (res.status === 422) {
-      const j = await res.json().catch(() => ({}));
-      throw new ValidationError(j.missingFields || []);
-    }
     let msg = `HTTP ${res.status}`;
-    try { const j = await res.json(); msg = j.error || msg; } catch(e) {}
+    try { const j = await res.json(); msg = j.error || msg; } catch (e) {}
     throw new Error(msg);
   }
   return res;
@@ -36,1064 +29,801 @@ async function generateDocument(projectId, fmt = 'docx', force = false) {
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const TYPE_COLORS = {
-  REFINERY: '#e65100', PETROCHEMICAL: '#6a1b9a', LNG: '#0277bd',
-  PIPELINE: '#2e7d32', TANKFARM: '#795548', UTILITY: '#37474f',
+  REFINERY:      '#e65100',
+  PETROCHEMICAL: '#6a1b9a',
+  LNG:           '#0277bd',
+  PIPELINE:      '#2e7d32',
+  TANKFARM:      '#795548',
+  UTILITY:       '#37474f',
 };
 
-// USER_TOGGLE section IDs — must match seed.js
-const TOGGLE_SECTION_IDS = new Set([46, 461, 424, 425]);
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+/** Collect all non-heading sections with isEnabled=true from the tree */
+function getActiveContentSections(treeData) {
+  const result = [];
+  function walk(nodes) {
+    if (!nodes) return;
+    for (const n of nodes) {
+      if (n.isEnabled !== false && !n.isHeadingOnly) result.push(n);
+      if (n.children?.length) walk(n.children);
+    }
+  }
+  walk(treeData?.sections);
+  return result;
+}
 
-// ─── DESIGN TOKENS ────────────────────────────────────────────────────────────
-const T = {
-  navy:     '#1a1a2e',
-  navyMid:  '#16213e',
-  sidebar:  '#1e2433',   // Overleaf-style dark sidebar
-  sidebarHover: '#2a3347',
-  sidebarActive:'#2f3d56',
-  amber:    '#c8963e',
-  orange:   '#e65100',
-  surface:  '#f0f2f5',
-  white:    '#ffffff',
-  border:   '#e5e7eb',
-  muted:    '#6b7280',
-  text:     '#111827',
-  sheet:    '#f5f6f8',   // slightly off-white background for pane columns
-};
+/** Deep update a single section's isEnabled in the tree */
+function updateTreeEnabled(sections, sectionId, isEnabled) {
+  return sections.map(n => {
+    if (n.id === sectionId) return { ...n, isEnabled };
+    if (n.children?.length) return { ...n, children: updateTreeEnabled(n.children, sectionId, isEnabled) };
+    return n;
+  });
+}
 
-// ─── STYLES ───────────────────────────────────────────────────────────────────
+/** Build meta-description line for a section */
+function buildMetaLine(section, sectionFields) {
+  const parts = [];
+  if (section.visibilityRule === 'USER_TOGGLE') parts.push('Optional section');
+  if (section.notes) parts.push(section.notes);
+  const mandatory = (sectionFields || []).filter(f => f.mandatory && f.valueType !== 'FIXED').length;
+  if (mandatory > 0) parts.push(`${mandatory} mandatory field${mandatory !== 1 ? 's' : ''}`);
+  return parts.join('  ·  ') || 'Review and configure this section';
+}
+
+// ─── STYLES ──────────────────────────────────────────────────────────────────
 const S = {
-  page:        { display: 'flex', flexDirection: 'column', height: '100vh', fontFamily: "'Inter', system-ui, sans-serif", overflow: 'hidden', color: T.text },
+  page:  { display: 'flex', flexDirection: 'column', height: '100vh', fontFamily: 'system-ui, sans-serif', overflow: 'hidden' },
+  nav:   { background: '#1a1a2e', color: '#fff', padding: '0 16px', height: '52px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, boxShadow: '0 2px 6px rgba(0,0,0,0.3)' },
+  navL:  { display: 'flex', alignItems: 'center', gap: '12px' },
+  navR:  { display: 'flex', alignItems: 'center', gap: '8px' },
+  navTitle: { margin: 0, fontSize: '17px', fontWeight: 700, flexShrink: 0 },
+  navName:  { fontSize: '13px', color: '#aaa', maxWidth: '240px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  navBadge: { fontSize: '10px', fontWeight: 700, padding: '2px 7px', borderRadius: '99px', color: '#fff' },
+  navSaved: { fontSize: '11px', color: '#81c784', transition: 'opacity 0.5s' },
+  genError: { fontSize: '11px', color: '#ff8a65', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  btnBack:     { background: 'none', border: '1px solid #555', color: '#ccc', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' },
+  btnGenerate: { background: '#e65100', border: 'none', color: '#fff', padding: '5px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', fontWeight: 600, whiteSpace: 'nowrap' },
+  btnPdf:      { background: '#1565c0', border: 'none', color: '#fff', padding: '5px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', fontWeight: 600, whiteSpace: 'nowrap' },
+  btnRevisions:{ background: '#37474f', border: 'none', color: '#fff', padding: '5px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', fontWeight: 600, whiteSpace: 'nowrap' },
+  btnAdmin:    { background: 'none', border: '1px solid #7c5cbf', color: '#c3a8f8', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap' },
 
-  // ── Nav bar — slim, dark, minimal chrome (Overleaf-inspired)
-  nav: {
-    background: T.navy,
-    borderBottom: `2px solid ${T.amber}`,
-    color: T.white,
-    padding: '0 16px',
-    height: '48px',
-    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    flexShrink: 0, zIndex: 10,
-  },
-  navLeft:     { display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 },
-  navLogo:     { display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 },
-  navLogoFlame:{ fontSize: '16px' },
-  navLogoText: { fontSize: '14px', fontWeight: 700, color: T.white, letterSpacing: '-0.2px' },
-  navDivider:  { width: '1px', height: '16px', background: 'rgba(255,255,255,0.12)', flexShrink: 0 },
-  navName:     { fontSize: '13px', color: 'rgba(255,255,255,0.65)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '260px' },
-  navBadge:    { fontSize: '10px', fontWeight: 700, padding: '2px 7px', borderRadius: '4px', color: T.white, flexShrink: 0, letterSpacing: '0.3px' },
-  navSaved:    { fontSize: '11px', color: '#86efac', flexShrink: 0, transition: 'opacity 0.5s' },
+  // ── Layout
+  body:  { display: 'flex', flex: 1, overflow: 'hidden' },
 
-  navRight:    { display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 },
-  genError:    { fontSize: '11px', color: '#fca5a5', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  // ── Left: TOC
+  toc:         { width: '270px', flexShrink: 0, background: '#fff', borderRight: '1px solid #e0e0e0', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+  tocHeader:   { padding: '10px 14px 8px', borderBottom: '1px solid #ececec', flexShrink: 0 },
+  tocTitle:    { fontSize: '10px', fontWeight: 700, color: '#888', letterSpacing: '0.8px', textTransform: 'uppercase', marginBottom: '8px' },
+  tocProgress: { height: '4px', borderRadius: '2px', background: '#f0f0f0', overflow: 'hidden', marginBottom: '4px' },
+  tocProgFill: (pct) => ({ height: '100%', width: `${pct}%`, background: pct === 100 ? '#4caf50' : '#ff9800', borderRadius: '2px', transition: 'width 0.3s' }),
+  tocProgText: { fontSize: '10px', color: '#aaa' },
+  tocScroll:   { flex: 1, overflowY: 'auto', padding: '4px 0' },
 
-  btnBack:     { background: 'none', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.65)', padding: '4px 10px', borderRadius: '5px', cursor: 'pointer', fontSize: '11px', whiteSpace: 'nowrap', transition: 'background 0.15s' },
-  btnRevisions:{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.75)', padding: '4px 10px', borderRadius: '5px', cursor: 'pointer', fontSize: '11px', fontWeight: 500, whiteSpace: 'nowrap' },
-  btnAdmin:    { background: `rgba(200,150,62,0.15)`, border: `1px solid ${T.amber}`, color: T.amber, padding: '4px 10px', borderRadius: '5px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap' },
-  btnGeneratePdf: { background: '#1d4ed8', border: 'none', color: T.white, padding: '5px 12px', borderRadius: '5px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', boxShadow: '0 1px 3px rgba(29,78,216,0.3)' },
-  btnGenerate: { background: T.orange, border: 'none', color: T.white, padding: '5px 12px', borderRadius: '5px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', boxShadow: '0 1px 3px rgba(230,81,0,0.3)' },
-
-  body:        { display: 'flex', flex: 1, overflow: 'hidden' },
-
-  // ── Sidebar — Overleaf dark style
-  sidebar:       { width: '248px', flexShrink: 0, background: T.sidebar, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-  sidebarHeader: { padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: '10px', fontWeight: 600, color: 'rgba(255,255,255,0.3)', letterSpacing: '0.8px', textTransform: 'uppercase' },
-  sidebarScroll: { flex: 1, overflowY: 'auto' },
-
-  // ── Section nodes — dark sidebar style
-  sectionNode:       { display: 'flex', alignItems: 'center', cursor: 'pointer', userSelect: 'none', borderLeft: '2px solid transparent' },
-  sectionNodeActive: { borderLeft: `2px solid ${T.amber}`, background: T.sidebarActive },
-  toggleBtn:         { background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.25)', padding: '0 4px', fontSize: '9px', flexShrink: 0, width: '18px' },
-  sectionLabel:      { flex: 1, padding: '5px 8px 5px 0', fontSize: '12px', lineHeight: 1.35, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'rgba(255,255,255,0.65)' },
-
-  // ── Toggle switch
-  toggleRow:    { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 8px 4px 0', gap: '6px' },
-  toggleSwitch: { position: 'relative', width: '28px', height: '16px', flexShrink: 0 },
-  toggleTrack:  (on) => ({ position: 'absolute', inset: 0, borderRadius: '99px', background: on ? T.amber : 'rgba(255,255,255,0.15)', transition: 'background 0.2s', cursor: 'pointer' }),
-  toggleThumb:  (on) => ({ position: 'absolute', top: '2px', left: on ? '14px' : '2px', width: '12px', height: '12px', borderRadius: '50%', background: T.white, transition: 'left 0.2s', pointerEvents: 'none' }),
-
-  // ── Completion dots
-  compDot: (status) => ({
-    width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0, marginRight: '4px',
-    background: status === 'green' ? '#4ade80' : status === 'amber' ? '#fb923c' : 'rgba(255,255,255,0.15)',
+  // ── Section nodes
+  sNode:       { display: 'flex', alignItems: 'center', cursor: 'pointer', userSelect: 'none', borderLeft: '3px solid transparent', position: 'relative' },
+  sNodeActive: { borderLeft: '3px solid #e65100', background: '#fff3e0' },
+  sNodeHidden: { opacity: 0.38 },
+  collapseBtn: { background: 'none', border: 'none', cursor: 'pointer', color: '#bbb', padding: '0 2px', fontSize: '9px', flexShrink: 0, width: '18px', lineHeight: 1 },
+  reviewDot:   (status) => ({
+    width: '7px', height: '7px', borderRadius: '50%', flexShrink: 0, marginRight: '3px',
+    background: status === 'reviewed' ? '#4caf50' : status === 'visited' ? '#ff9800' : '#ddd',
   }),
+  sLabel:      { flex: 1, padding: '5px 6px 5px 0', fontSize: '12.5px', lineHeight: 1.35, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  sNumHint:    { fontFamily: 'monospace', fontSize: '10px', color: '#bbb', marginRight: '4px' },
+  eyeBtn:      { background: 'none', border: 'none', cursor: 'pointer', color: '#bbb', padding: '0 4px', fontSize: '12px', flexShrink: 0, lineHeight: 1, opacity: 0.7 },
 
-  // ── Two content columns — Overleaf pane style
-  editorCol:   { flex: 1, minWidth: '380px', overflowY: 'auto', background: T.sheet, display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '0 0 48px' },
-  previewCol:  { flex: 1, minWidth: '380px', overflowY: 'auto', background: '#ebebee', borderLeft: '1px solid #d4d6dc', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '0 0 48px' },
+  // ── Center: CompilerPanel wrapper
+  center: { flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', background: '#f4f4f4', borderRight: '1px solid #e0e0e0', minWidth: 0 },
 
-  // Column label strip
-  colHeader:   { width: '100%', padding: '8px 0 7px', textAlign: 'center', fontSize: '9px', fontWeight: 600, letterSpacing: '1.4px', textTransform: 'uppercase', color: '#9ca3af', flexShrink: 0, userSelect: 'none', borderBottom: '1px solid rgba(0,0,0,0.05)' },
+  // ── Right: Editor panel
+  right:       { width: '380px', flexShrink: 0, background: '#fafafa', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+  rightScroll: { flex: 1, overflowY: 'auto', padding: '20px 18px 0' },
+  rightFoot:   { padding: '12px 18px', borderTop: '1px solid #ececec', flexShrink: 0 },
+  rightEmpty:  { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#bbb', gap: '10px', padding: '40px 20px', textAlign: 'center' },
 
-  // White paper sheet
-  sheet:       { width: '100%', maxWidth: '660px', background: T.white, boxShadow: '0 1px 8px rgba(0,0,0,0.09), 0 4px 20px rgba(0,0,0,0.06)', borderRadius: '2px', minHeight: '680px', flexShrink: 0 },
-  sheetPad:    { padding: '36px 44px' },
+  // Section header in right panel
+  secTitle:  { margin: '0 0 2px', fontSize: '16px', fontWeight: 700, color: '#1a1a2e', lineHeight: 1.3 },
+  secMeta:   { fontSize: '12px', color: '#aaa', marginBottom: '18px' },
+  secNum:    { color: '#ccc', marginRight: '8px', fontSize: '13px', fontFamily: 'monospace' },
 
-  // Editor content
-  placeholder:       { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '520px', color: '#9ca3af', gap: '12px' },
-  sectionPanelTitle: { margin: '0 0 4px', fontSize: '19px', fontWeight: 700, color: T.text, letterSpacing: '-0.3px' },
-  sectionPanelMeta:  { fontSize: '12px', color: T.muted, marginBottom: '28px' },
+  // ── Mark Reviewed button
+  btnReviewed:   { width: '100%', padding: '10px', background: '#4caf50', border: 'none', color: '#fff', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 700 },
+  btnUnreviewed: { width: '100%', padding: '10px', background: '#fff', border: '2px solid #4caf50', color: '#4caf50', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 700 },
+  btnAlreadyRev: { width: '100%', padding: '10px', background: '#e8f5e9', border: '1px solid #a5d6a7', color: '#2e7d32', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 600 },
 
-  // ── Field cards — clean white cards
-  fieldCard:     { background: T.white, border: `1px solid ${T.border}`, borderRadius: '8px', padding: '18px 22px', marginBottom: '14px' },
-  fieldLabel:    { fontSize: '12px', fontWeight: 600, color: '#374151', marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px', textTransform: 'uppercase', letterSpacing: '0.3px' },
-  mandatoryDot:  { width: '5px', height: '5px', borderRadius: '50%', background: T.orange, flexShrink: 0 },
-  fieldUnits:    { fontSize: '11px', color: T.muted, fontWeight: 400, marginLeft: '4px', textTransform: 'none', letterSpacing: 0 },
-  inputBase:     { width: '100%', fontSize: '14px', padding: '8px 11px', borderRadius: '6px', border: `1.5px solid ${T.border}`, boxSizing: 'border-box', fontFamily: 'inherit', outline: 'none', resize: 'vertical', transition: 'border-color 0.15s', color: T.text },
-  inputFocus:    { borderColor: T.amber },
-  inputFixed:    { background: '#f9fafb', color: '#9ca3af', border: `1px solid ${T.border}`, cursor: 'not-allowed' },
-  inputWarning:  { borderColor: '#f97316', background: '#fff7ed' },
-  fixedBadge:    { fontSize: '9px', background: '#f3f4f6', color: '#9ca3af', padding: '1px 6px', borderRadius: '3px', fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase' },
-  noFields:      { color: '#9ca3af', fontSize: '13px', fontStyle: 'italic', padding: '12px 0' },
-  savingPill:    { fontSize: '10px', color: T.muted, padding: '2px 7px', background: '#f3f4f6', borderRadius: '99px' },
-  errBox:        { padding: '40px', color: '#dc2626' },
+  // ── Standards panel
+  stdPanel:    { marginTop: '0', borderTop: '1px solid #ececec' },
+  stdHeader:   { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 18px', cursor: 'pointer', background: '#f0f4ff', color: '#3949ab', fontSize: '12px', fontWeight: 700, userSelect: 'none', flexShrink: 0 },
+  stdBody:     { padding: '12px 18px', overflowY: 'auto', maxHeight: '260px' },
+  stdCard:     { background: '#fff', border: '1px solid #e8eaf6', borderRadius: '6px', padding: '10px 12px', marginBottom: '10px' },
+  stdCode:     { fontSize: '10px', fontWeight: 700, background: '#3949ab', color: '#fff', padding: '2px 7px', borderRadius: '4px', display: 'inline-block', marginBottom: '4px' },
+  stdClause:   { fontSize: '10px', color: '#888', marginLeft: '6px' },
+  stdTitle:    { fontSize: '12px', fontWeight: 600, color: '#1a1a2e', margin: '4px 0 6px' },
+  stdBody_:    { fontSize: '11.5px', color: '#555', lineHeight: 1.55, whiteSpace: 'pre-wrap' },
+  stdEmpty:    { fontSize: '12px', color: '#aaa', fontStyle: 'italic', padding: '4px 0' },
+  stdLoading:  { fontSize: '12px', color: '#aaa', padding: '4px 0' },
+
+  // ── Field editor
+  fieldCard:   { background: '#fff', border: '1px solid #e8e8e8', borderRadius: '8px', padding: '16px 18px', marginBottom: '12px' },
+  fieldLabel:  { fontSize: '12px', fontWeight: 600, color: '#333', marginBottom: '5px', display: 'flex', alignItems: 'center', gap: '5px' },
+  mandDot:     { width: '5px', height: '5px', borderRadius: '50%', background: '#e65100', flexShrink: 0 },
+  fieldUnits:  { fontSize: '10px', color: '#aaa', fontWeight: 400 },
+  inputBase:   { width: '100%', fontSize: '13px', padding: '7px 9px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box', fontFamily: 'inherit', outline: 'none', resize: 'vertical', transition: 'border-color 0.15s' },
+  inputFixed:  { background: '#f8f8f8', color: '#999', cursor: 'not-allowed', border: '1px solid #eee' },
+  inputWarn:   { borderColor: '#ff9800', background: '#fffde7' },
+  fixedBadge:  { fontSize: '9px', background: '#f0f0f0', color: '#aaa', padding: '1px 5px', borderRadius: '3px', fontWeight: 700, letterSpacing: '0.4px' },
+  noFields:    { color: '#bbb', fontSize: '13px', fontStyle: 'italic', padding: '8px 0' },
+  savePill:    { fontSize: '10px', color: '#aaa', padding: '2px 6px', background: '#f0f0f0', borderRadius: '99px' },
+  errBox:      { padding: '40px', color: '#c62828' },
 
   // ── Table styles
-  tableWrap:      { marginBottom: '28px' },
-  tableLabel:     { fontSize: '13px', fontWeight: 600, color: T.text, marginBottom: '10px' },
-  tableEl:        { width: '100%', borderCollapse: 'collapse', fontSize: '13px', background: T.white, border: `1px solid ${T.border}`, borderRadius: '6px', overflow: 'hidden' },
-  th:             { background: '#f9fafb', padding: '8px 10px', textAlign: 'left', fontWeight: 600, fontSize: '11px', color: '#6b7280', borderBottom: `1px solid ${T.border}`, whiteSpace: 'nowrap', textTransform: 'uppercase', letterSpacing: '0.3px' },
-  td:             { padding: '7px 10px', borderBottom: `1px solid #f3f4f6`, verticalAlign: 'top' },
-  tdCheck:        { width: '36px', textAlign: 'center', padding: '7px 4px', borderBottom: `1px solid #f3f4f6` },
-  tdSno:          { width: '48px', textAlign: 'center', color: T.muted, fontWeight: 600, fontSize: '12px', padding: '7px 6px', borderBottom: `1px solid #f3f4f6` },
-  cellInput:      { width: '100%', border: 'none', outline: 'none', fontSize: '13px', fontFamily: 'inherit', background: 'transparent', padding: '0', resize: 'none', lineHeight: 1.4 },
-  addRowBtn:      { marginTop: '8px', background: 'none', border: `1px dashed ${T.border}`, color: T.muted, padding: '6px 14px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px', transition: 'border-color 0.15s' },
-  deleteRowBtn:   { background: 'none', border: 'none', color: '#d1d5db', cursor: 'pointer', fontSize: '14px', padding: '0 4px', lineHeight: 1 },
-
-  // ── Checklist
-  checkListWrap:  { marginBottom: '24px' },
-  checkListItem:  { display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '8px 0', borderBottom: `1px solid #f3f4f6` },
-  checkListLabel: { flex: 1, fontSize: '13px', color: T.text, lineHeight: 1.55 },
-  addItemBtn:     { marginTop: '10px', background: 'none', border: `1px dashed ${T.border}`, color: T.muted, padding: '6px 14px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' },
-
-  // ── Missing fields modal
-  modalOverlay:   { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  modalBox:       { background: T.white, borderRadius: '10px', padding: '28px 32px', maxWidth: '480px', width: '90%', boxShadow: '0 8px 40px rgba(0,0,0,0.18)', fontFamily: "'Inter', system-ui, sans-serif" },
-  modalTitle:     { margin: '0 0 8px', fontSize: '16px', fontWeight: 700, color: T.text },
-  modalSubtitle:  { margin: '0 0 18px', fontSize: '13px', color: T.muted, lineHeight: 1.6 },
-  modalList:      { margin: '0 0 20px', padding: 0, listStyle: 'none', maxHeight: '240px', overflowY: 'auto' },
-  modalListItem:  { display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '7px 0', borderBottom: `1px solid #f3f4f6` },
-  modalSectionNo: { fontSize: '11px', fontWeight: 700, color: T.orange, fontFamily: 'monospace', minWidth: '42px', paddingTop: '1px' },
-  modalFieldLabel:{ fontSize: '13px', color: T.text },
-  modalSectionTitle:{ fontSize: '11px', color: T.muted, marginTop: '1px' },
-  modalBtns:      { display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '4px' },
-  btnModalCancel: { background: T.white, border: `1px solid ${T.border}`, color: '#374151', padding: '8px 18px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 500 },
-  btnModalForce:  { background: T.orange, border: 'none', color: T.white, padding: '8px 18px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 600 },
+  tableWrap:   { marginBottom: '20px' },
+  tableLabel:  { fontSize: '13px', fontWeight: 700, color: '#1a1a2e', marginBottom: '8px' },
+  tableEl:     { width: '100%', borderCollapse: 'collapse', fontSize: '12px', background: '#fff', border: '1px solid #e0e0e0', borderRadius: '5px', overflow: 'hidden' },
+  th:          { background: '#f0f0f0', padding: '7px 8px', textAlign: 'left', fontWeight: 600, fontSize: '11px', color: '#555', borderBottom: '2px solid #ddd' },
+  td:          { padding: '6px 8px', borderBottom: '1px solid #f4f4f4', verticalAlign: 'top' },
+  tdCheck:     { width: '32px', textAlign: 'center', padding: '6px 3px', borderBottom: '1px solid #f4f4f4' },
+  tdSno:       { width: '42px', textAlign: 'center', color: '#999', fontWeight: 600, fontSize: '11px', padding: '6px 5px', borderBottom: '1px solid #f4f4f4' },
+  cellInput:   { width: '100%', border: 'none', outline: 'none', fontSize: '12px', fontFamily: 'inherit', background: 'transparent', padding: '0', resize: 'none', lineHeight: 1.4 },
+  addRowBtn:   { marginTop: '6px', background: 'none', border: '1px dashed #ccc', color: '#aaa', padding: '5px 12px', borderRadius: '5px', cursor: 'pointer', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '5px' },
+  delRowBtn:   { background: 'none', border: 'none', color: '#ddd', cursor: 'pointer', fontSize: '13px', padding: '0 3px' },
+  clItemWrap:  { marginBottom: '20px' },
+  clItem:      { display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '6px 0', borderBottom: '1px solid #f8f8f8' },
+  clLabel:     { flex: 1, fontSize: '12px', color: '#333', lineHeight: 1.45 },
+  addItemBtn:  { marginTop: '8px', background: 'none', border: '1px dashed #ccc', color: '#aaa', padding: '5px 12px', borderRadius: '5px', cursor: 'pointer', fontSize: '11px' },
 };
 
-// ─── TOGGLE SWITCH COMPONENT ──────────────────────────────────────────────────
+// ─── TOGGLE SWITCH ────────────────────────────────────────────────────────────
 function ToggleSwitch({ on, onChange }) {
+  const track = { position: 'relative', width: '30px', height: '16px', flexShrink: 0 };
+  const bg    = { position: 'absolute', inset: 0, borderRadius: '99px', background: on ? '#e65100' : '#ccc', transition: 'background 0.2s', cursor: 'pointer' };
+  const thumb = { position: 'absolute', top: '2px', left: on ? '14px' : '2px', width: '12px', height: '12px', borderRadius: '50%', background: '#fff', transition: 'left 0.2s', pointerEvents: 'none' };
   return (
-    <div style={S.toggleSwitch} onClick={e => { e.stopPropagation(); onChange(!on); }}>
-      <div style={S.toggleTrack(on)} />
-      <div style={S.toggleThumb(on)} />
+    <div style={track} onClick={e => { e.stopPropagation(); onChange(!on); }}>
+      <div style={bg} /><div style={thumb} />
     </div>
   );
 }
 
 // ─── SECTION NODE (recursive) ─────────────────────────────────────────────────
-function SectionNode({ node, depth, activeId, onSelect, collapsed, onToggleCollapse, enabledToggleIds, onToggleSection, completionMap }) {
-  const hasChildren = node.children && node.children.length > 0;
+function SectionNode({ node, depth, activeId, onSelect, collapsed, onToggleCollapse, onToggleSection, reviewStatus }) {
+  const hasChildren = node.children?.length > 0;
   const isActive    = activeId === node.id;
-  const isCollapsed = collapsed[node.id];
-  const isToggle    = TOGGLE_SECTION_IDS.has(node.id);
-  const indent      = depth * 14;
-  const dotStatus   = completionMap?.[node.id]; // 'green' | 'amber' | 'grey' | undefined
+  const isEnabled   = node.isEnabled !== false;
+  const indent      = depth * 13 + 6;
+
+  const dotStatus = !node.isHeadingOnly ? reviewStatus(node.id) : null;
 
   const labelStyle = {
-    ...S.sectionLabel,
-    color: isActive
-      ? T.white
-      : node.isHeadingOnly
-        ? 'rgba(255,255,255,0.85)'
-        : 'rgba(255,255,255,0.55)',
-    fontWeight: node.isHeadingOnly ? 600 : 400,
-    ...(isActive ? { color: T.white, fontWeight: 600 } : {}),
+    ...S.sLabel,
+    color:      isActive ? '#e65100' : node.isHeadingOnly ? '#222' : '#555',
+    fontWeight: node.isHeadingOnly ? 700 : isActive ? 600 : 400,
   };
-
-  if (isToggle) {
-    const isOn = enabledToggleIds.has(node.id);
-    return (
-      <>
-        <div style={{ ...S.sectionNode, paddingLeft: `${indent + 6}px`, cursor: 'default', opacity: isOn ? 1 : 0.55 }}>
-          <button style={S.toggleBtn} onClick={e => { e.stopPropagation(); if (hasChildren && isOn) onToggleCollapse(node.id); }}>
-            {hasChildren && isOn ? (isCollapsed ? '▶' : '▼') : ''}
-          </button>
-          <div style={S.toggleRow}>
-            <span style={{ ...S.sectionLabel, color: 'rgba(255,255,255,0.75)', fontWeight: 600 }}>
-              <span style={{ color: 'rgba(255,255,255,0.25)', marginRight: '6px', fontSize: '10px', fontFamily: 'monospace' }}>{node.numberHint}</span>
-              {node.titleTemplate}
-            </span>
-            <ToggleSwitch on={isOn} onChange={(val) => onToggleSection(node.id, val)} />
-          </div>
-        </div>
-        {hasChildren && isOn && !isCollapsed && node.children.map(child => (
-          <SectionNode key={child.id} node={child} depth={depth + 1}
-            activeId={activeId} onSelect={onSelect} collapsed={collapsed}
-            onToggleCollapse={onToggleCollapse} enabledToggleIds={enabledToggleIds}
-            onToggleSection={onToggleSection} completionMap={completionMap} />
-        ))}
-      </>
-    );
-  }
 
   return (
     <>
-      <div
-        style={{ ...S.sectionNode, ...(isActive ? S.sectionNodeActive : {}), paddingLeft: `${indent + 6}px` }}
-        onClick={() => !node.isHeadingOnly && onSelect(node)}
-        title={`${node.numberHint} ${node.titleTemplate}`}
-      >
-        <button style={S.toggleBtn} onClick={e => { e.stopPropagation(); if (hasChildren) onToggleCollapse(node.id); }}>
-          {hasChildren ? (isCollapsed ? '▶' : '▼') : ''}
-        </button>
-        {dotStatus && <span style={S.compDot(dotStatus)} title={
-          dotStatus === 'green' ? 'All mandatory fields filled' :
-          dotStatus === 'amber' ? 'Some mandatory fields missing' : ''
-        } />}
-        <span style={labelStyle}>
-          <span style={{ color: 'rgba(255,255,255,0.22)', marginRight: '5px', fontSize: '10px', fontFamily: 'monospace' }}>{node.numberHint}</span>
+      <div style={{
+        ...S.sNode,
+        paddingLeft: `${indent}px`,
+        ...(isActive && isEnabled ? S.sNodeActive : {}),
+        ...(!isEnabled ? S.sNodeHidden : {}),
+      }}>
+        {/* Collapse button for parents */}
+        {hasChildren ? (
+          <button style={S.collapseBtn} onClick={e => { e.stopPropagation(); onToggleCollapse(node.id); }}>
+            {collapsed[node.id] ? '▶' : '▼'}
+          </button>
+        ) : (
+          <span style={{ width: '18px', flexShrink: 0 }} />
+        )}
+
+        {/* Review dot */}
+        {dotStatus && <span style={S.reviewDot(dotStatus)} title={dotStatus} />}
+
+        {/* Section label */}
+        <span
+          style={labelStyle}
+          onClick={() => !node.isHeadingOnly && isEnabled && onSelect(node)}
+          title={`${node.numberHint || ''} ${node.titleTemplate}`}
+        >
+          {node.numberHint && <span style={S.sNumHint}>{node.numberHint}</span>}
           {node.titleTemplate}
         </span>
+
+        {/* Eye toggle */}
+        <button
+          style={{ ...S.eyeBtn, color: isEnabled ? '#bbb' : '#ccc' }}
+          onClick={e => { e.stopPropagation(); onToggleSection(node.id, !isEnabled, node.visibilityRule); }}
+          title={isEnabled ? 'Hide from document' : 'Include in document'}
+        >
+          {isEnabled ? '👁' : '◌'}
+        </button>
       </div>
-      {hasChildren && !isCollapsed && node.children.map(child => (
-        <SectionNode key={child.id} node={child} depth={depth + 1}
-          activeId={activeId} onSelect={onSelect} collapsed={collapsed}
-          onToggleCollapse={onToggleCollapse} enabledToggleIds={enabledToggleIds}
-          onToggleSection={onToggleSection} completionMap={completionMap} />
-      ))}
+
+      {/* Children */}
+      {hasChildren && !collapsed[node.id] &&
+        node.children.map(child => (
+          <SectionNode
+            key={child.id}
+            node={child}
+            depth={depth + 1}
+            activeId={activeId}
+            onSelect={onSelect}
+            collapsed={collapsed}
+            onToggleCollapse={onToggleCollapse}
+            onToggleSection={onToggleSection}
+            reviewStatus={reviewStatus}
+          />
+        ))
+      }
     </>
   );
 }
 
-// ─── FIELD ROW COMPONENT ──────────────────────────────────────────────────────
-function FieldRow({ field, value, onChange, onBlur, saving }) {
+// ─── FIELD INPUT ──────────────────────────────────────────────────────────────
+function FieldInput({ field, value, onChange, onBlur, saving }) {
   const [focused, setFocused] = useState(false);
-  const isEmpty   = !value || value.trim() === '';
-  const isWarning = field.mandatory && isEmpty && field.valueType !== 'FIXED';
+  const isFixed = field.valueType === 'FIXED';
 
-  const baseStyle = {
+  const inputStyle = {
     ...S.inputBase,
-    ...(field.valueType === 'FIXED'  ? S.inputFixed  : {}),
-    ...(isWarning                    ? S.inputWarning : {}),
-    ...(focused && field.valueType !== 'FIXED' ? S.inputFocus : {}),
+    ...(isFixed ? S.inputFixed : {}),
+    ...(!isFixed && !value && field.mandatory ? S.inputWarn : {}),
+    ...(focused && !isFixed ? { borderColor: '#e65100', outline: 'none' } : {}),
   };
 
+  if (isFixed) {
+    return <input readOnly style={inputStyle} value={value || field.fixedValue || ''} />;
+  }
+  if (field.valueType === 'DROPDOWN') {
+    const opts = Array.isArray(field.dropdownOptions) ? field.dropdownOptions : [];
+    return (
+      <select style={inputStyle} value={value || ''} onChange={e => onChange(field.fieldId, e.target.value)} onBlur={() => onBlur(field.fieldId, value)}>
+        <option value="">— Select —</option>
+        {opts.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    );
+  }
   return (
-    <div style={S.fieldCard}>
-      <div style={S.fieldLabel}>
-        {field.mandatory && field.valueType !== 'FIXED' && <span style={S.mandatoryDot} title="Required" />}
-        {field.label}
-        {field.units && <span style={S.fieldUnits}>({field.units})</span>}
-        {field.valueType === 'FIXED' && <span style={S.fixedBadge}>FIXED</span>}
-        {saving && <span style={S.savingPill}>saving…</span>}
-      </div>
+    <textarea
+      style={{ ...inputStyle, minHeight: '34px' }}
+      value={value || ''}
+      onChange={e => onChange(field.fieldId, e.target.value)}
+      onBlur={() => onBlur(field.fieldId, value)}
+      onFocus={() => setFocused(true)}
+      rows={1}
+    />
+  );
+}
 
-      {field.valueType === 'FIXED' && (
-        <div style={{ ...baseStyle, minHeight: '36px', display: 'flex', alignItems: 'center' }}>
-          {value || '—'}
+// ─── FIELD EDITOR PANEL ───────────────────────────────────────────────────────
+function FieldEditorPanel({ section, sectionFields, allFieldValues, onFieldChange, onFieldBlur, savingFields }) {
+  if (!sectionFields || sectionFields.length === 0) {
+    return <p style={S.noFields}>No configurable fields for this section.</p>;
+  }
+
+  const editableFields = sectionFields.filter(f => f.valueType !== 'FIXED');
+  const fixedFields    = sectionFields.filter(f => f.valueType === 'FIXED');
+
+  return (
+    <div>
+      {editableFields.map(f => (
+        <div key={f.fieldId} style={S.fieldCard}>
+          <div style={S.fieldLabel}>
+            {f.mandatory && <span style={S.mandDot} />}
+            {f.label}
+            {f.units && <span style={S.fieldUnits}>({f.units})</span>}
+            {savingFields?.has(f.fieldId) && <span style={S.savePill}>saving…</span>}
+          </div>
+          <FieldInput
+            field={f}
+            value={allFieldValues[f.fieldId] ?? f.resolvedValue ?? ''}
+            onChange={onFieldChange}
+            onBlur={onFieldBlur}
+            saving={savingFields?.has(f.fieldId)}
+          />
         </div>
-      )}
-
-      {field.valueType === 'DROPDOWN' && (
-        <select
-          style={{ ...baseStyle, height: '36px' }}
-          value={value}
-          onChange={e => onChange(field.fieldId, e.target.value)}
-          onBlur={() => { setFocused(false); onBlur(field.fieldId, value); }}
-          onFocus={() => setFocused(true)}
-        >
-          {(!field.dropdownOptions || field.dropdownOptions.length === 0) && (
-            <option value="">— no options —</option>
-          )}
-          {(field.dropdownOptions || []).map(opt => (
-            <option key={opt} value={opt}>{opt}</option>
+      ))}
+      {fixedFields.length > 0 && (
+        <>
+          <div style={{ fontSize: '10px', fontWeight: 700, color: '#ccc', textTransform: 'uppercase', letterSpacing: '0.7px', marginBottom: '8px', marginTop: '4px' }}>
+            Fixed Values
+          </div>
+          {fixedFields.map(f => (
+            <div key={f.fieldId} style={{ ...S.fieldCard, background: '#f9f9f9' }}>
+              <div style={S.fieldLabel}>
+                {f.label}
+                <span style={S.fixedBadge}>FIXED</span>
+              </div>
+              <input readOnly style={{ ...S.inputBase, ...S.inputFixed }} value={f.fixedValue || f.resolvedValue || ''} />
+            </div>
           ))}
-        </select>
-      )}
-
-      {field.valueType === 'MANUAL' && (
-        <textarea
-          style={{ ...baseStyle, minHeight: value && value.length > 100 ? '120px' : '60px' }}
-          value={value}
-          onChange={e => onChange(field.fieldId, e.target.value)}
-          onBlur={() => { setFocused(false); onBlur(field.fieldId, value); }}
-          onFocus={() => setFocused(true)}
-          placeholder={isWarning ? '⚠ This field is required' : ''}
-        />
-      )}
-
-      {isWarning && (
-        <div style={{ fontSize: '11px', color: '#e65100', marginTop: '4px' }}>
-          Required — please fill in this field
-        </div>
+        </>
       )}
     </div>
   );
 }
 
-// ─── S.No COMPUTATION HELPER ──────────────────────────────────────────────────
-// Never stored — always computed at render time from visible (checked) rows.
-function computeSno(index, snoFormat) {
-  if (snoFormat === 'alpha_lower') return `${String.fromCharCode(96 + index)}.`;
-  if (snoFormat === 'alpha_upper') return `${String.fromCharCode(64 + index)}.`;
-  return String(index);
-}
+// ─── CHECKTABLE ───────────────────────────────────────────────────────────────
+function CheckTable({ projectId, table, snoFormat }) {
+  const [rows, setRows]     = useState(null);
+  const [projRows, setProjRows] = useState([]);
 
-// ─── CHECK TABLE COMPONENT ────────────────────────────────────────────────────
-// Handles sections that have only a SectionTable (no fields).
-// Also used as the bottom half of TextPlusTable.
-function CheckTable({ projectId, tableData, onSavedFlash, onTableChange }) {
-  // tableData comes from GET /api/projects/:id/tablerows/:tableId
-  // We manage local state so UI updates instantly; network calls happen on blur/change.
-  const [seedRows,    setSeedRows]    = useState(tableData.seedRows    ?? []);
-  const [projectRows, setProjectRows] = useState(tableData.projectRows ?? []);
-
-  // Notify parent (Editor) of live row state changes so CompilerPanel reflects them
-  const notifyChange = useCallback((seeds, projs) => {
-    onTableChange?.(tableData.tableId, { seedRows: seeds, projectRows: projs });
-  }, [onTableChange, tableData.tableId]);
-
-  // Fire initial notification so preview is seeded on first load
   useEffect(() => {
-    notifyChange(seedRows, projectRows);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!table?.id) return;
+    sectionsApi.getTableRows(projectId, table.id)
+      .then(d => { setRows(d.seedRows || []); setProjRows(d.projectRows || []); })
+      .catch(console.error);
+  }, [projectId, table?.id]);
 
-  // Track pending cell edits (rowId -> { col: value }) before blur-save
-  const pendingEdits = useRef({});
+  if (!rows) return <div style={{ fontSize: '12px', color: '#aaa', padding: '8px 0' }}>Loading table…</div>;
 
-  const columns      = tableData.columns      ?? [];
-  const snoFormat    = tableData.snoFormat    ?? 'numeric';
-  const canAdd       = tableData.canAddRows;
-  const canDelete    = tableData.canDeleteRows;
-  const canSelect    = tableData.canSelectDeselect;
+  const formatSno = (i) => snoFormat === 'alpha_lower'
+    ? String.fromCharCode(97 + i) + '.'
+    : snoFormat === 'alpha_upper'
+      ? String.fromCharCode(65 + i) + '.'
+      : `${i + 1}.`;
 
-  // Compute live S.No for all visible rows (checked seed rows + all project rows)
-  // Returns Map<rowKey, snoLabel> where rowKey = `seed-${id}` or `proj-${id}`
-  const computeSnoMap = useCallback(() => {
-    const map = {};
-    let counter = 1;
-    for (const r of seedRows) {
-      if (r.isChecked || r.isMandatory) {
-        map[`seed-${r.id}`] = computeSno(counter++, snoFormat);
-      }
-    }
-    for (const r of projectRows) {
-      map[`proj-${r.id}`] = computeSno(counter++, snoFormat);
-    }
-    return map;
-  }, [seedRows, projectRows, snoFormat]);
+  const allRows = [...rows, ...projRows];
 
-  // ── Seed row checkbox toggle ───────────────────────────────────────────
-  const handleSeedCheck = useCallback(async (rowId, checked) => {
-    const updated = seedRows.map(r => r.id === rowId ? { ...r, isChecked: checked } : r);
-    setSeedRows(updated);
-    notifyChange(updated, projectRows);
+  async function addRow() {
     try {
-      await sectionsApi.toggleSeedRow(projectId, rowId, { isChecked: checked });
-      onSavedFlash();
-    } catch (e) {
-      console.error('toggleSeedRow error:', e);
-      const reverted = updated.map(r => r.id === rowId ? { ...r, isChecked: !checked } : r);
-      setSeedRows(reverted);
-      notifyChange(reverted, projectRows);
-    }
-  }, [projectId, onSavedFlash, seedRows, projectRows, notifyChange]);
+      const created = await sectionsApi.addTableRow(projectId, table.id, { rowData: {} });
+      setProjRows(r => [...r, created]);
+    } catch (e) { console.error(e); }
+  }
 
-  // ── Engineer row cell edit (track locally until blur) ─────────────────
-  const handleCellChange = useCallback((rowId, colKey, value) => {
-    const updated = projectRows.map(r => {
-      if (r.id !== rowId) return r;
-      return { ...r, rowData: { ...r.rowData, [colKey]: value } };
-    });
-    setProjectRows(updated);
-    notifyChange(seedRows, updated);
-    if (!pendingEdits.current[rowId]) pendingEdits.current[rowId] = {};
-    pendingEdits.current[rowId][colKey] = value;
-  }, [seedRows, projectRows, notifyChange]);
-
-  // ── Save engineer row on cell blur ────────────────────────────────────
-  const handleCellBlur = useCallback(async (rowId) => {
-    if (!pendingEdits.current[rowId]) return;
-    delete pendingEdits.current[rowId];
-
-    const row = projectRows.find(r => r.id === rowId);
-    if (!row) return;
-    try {
-      await sectionsApi.updateTableRow(projectId, rowId, { rowData: row.rowData });
-      onSavedFlash();
-    } catch (e) {
-      console.error('updateTableRow error:', e);
-    }
-  }, [projectId, projectRows, onSavedFlash]);
-
-  // ── Add new engineer row ───────────────────────────────────────────────
-  const handleAddRow = useCallback(async () => {
-    const emptyRowData = {};
-    columns.forEach(col => {
-      if (col.type !== 'READONLY') emptyRowData[col.key] = '';
-    });
-    try {
-      const created = await sectionsApi.addTableRow(projectId, tableData.tableId, { rowData: emptyRowData });
-      const updated = [...projectRows, created];
-      setProjectRows(updated);
-      notifyChange(seedRows, updated);
-      onSavedFlash();
-    } catch (e) {
-      console.error('addTableRow error:', e);
-    }
-  }, [projectId, tableData.tableId, columns, seedRows, projectRows, notifyChange, onSavedFlash]);
-
-  const handleDeleteRow = useCallback(async (rowId) => {
-    const updated = projectRows.filter(r => r.id !== rowId);
-    setProjectRows(updated);
-    notifyChange(seedRows, updated);
+  async function deleteRow(rowId) {
     try {
       await sectionsApi.deleteTableRow(projectId, rowId);
-      onSavedFlash();
-    } catch (e) {
-      console.error('deleteTableRow error:', e);
-    }
-  }, [projectId, seedRows, projectRows, notifyChange, onSavedFlash]);
+      setProjRows(r => r.filter(x => x.id !== rowId));
+    } catch (e) { console.error(e); }
+  }
 
-  const snoMap = computeSnoMap();
+  async function toggleSeed(rowId, checked) {
+    setRows(rs => rs.map(r => r.id === rowId ? { ...r, isChecked: checked } : r));
+    try { await sectionsApi.toggleSeedRow(projectId, rowId, { isChecked: checked }); }
+    catch (e) { console.error(e); }
+  }
 
-  // Determine if this table has a S.No (READONLY) column
-  const hasSnoCol = columns.some(c => c.type === 'READONLY');
-  const dataCols  = columns.filter(c => c.type !== 'READONLY');
+  const cols = Array.isArray(table.columns) ? table.columns : [];
 
   return (
     <div style={S.tableWrap}>
-      {tableData.label && <div style={S.tableLabel}>{tableData.label}</div>}
+      <div style={S.tableLabel}>{table.label}</div>
       <table style={S.tableEl}>
         <thead>
           <tr>
-            {canSelect && <th style={{ ...S.th, width: '36px' }}></th>}
-            {hasSnoCol  && <th style={{ ...S.th, width: '48px' }}>S.No</th>}
-            {dataCols.map(col => (
-              <th key={col.key} style={S.th}>{col.label}</th>
-            ))}
-            {canDelete && <th style={{ ...S.th, width: '32px' }}></th>}
+            {table.canSelectDeselect && <th style={S.th}></th>}
+            <th style={S.th}>S.No</th>
+            {cols.map(c => <th key={c.key} style={S.th}>{c.label}</th>)}
+            <th style={S.th}></th>
           </tr>
         </thead>
         <tbody>
-          {/* ── Seed rows ── */}
-          {seedRows.map(row => {
-            const isVisible = row.isChecked || row.isMandatory;
-            if (!isVisible && !canSelect) return null; // if can't select, hide unchecked
-            const sno = snoMap[`seed-${row.id}`] ?? '';
-            const rowStyle = !isVisible ? { opacity: 0.4 } : {};
-            return (
-              <tr key={`seed-${row.id}`} style={rowStyle}>
-                {canSelect && (
-                  <td style={S.tdCheck}>
-                    {row.isMandatory
-                      ? <span title="Mandatory" style={{ color: '#e65100', fontSize: '12px' }}>●</span>
-                      : <input
-                          type="checkbox"
-                          checked={row.isChecked}
-                          onChange={e => handleSeedCheck(row.id, e.target.checked)}
-                          style={{ cursor: 'pointer' }}
-                        />
-                    }
-                  </td>
+          {rows.map((row, i) => (
+            <tr key={row.id} style={{ opacity: row.isChecked ? 1 : 0.4 }}>
+              {table.canSelectDeselect && (
+                <td style={S.tdCheck}>
+                  <input type="checkbox" checked={!!row.isChecked} onChange={e => toggleSeed(row.id, e.target.checked)} disabled={row.isMandatory} />
+                </td>
+              )}
+              <td style={S.tdSno}>{formatSno(i)}</td>
+              {cols.map(c => <td key={c.key} style={S.td}>{row.rowData?.[c.key] ?? ''}</td>)}
+              <td style={S.td}></td>
+            </tr>
+          ))}
+          {projRows.map((row, i) => (
+            <tr key={row.id}>
+              {table.canSelectDeselect && <td style={S.tdCheck} />}
+              <td style={S.tdSno}>{formatSno(rows.length + i)}</td>
+              {cols.map(c => (
+                <td key={c.key} style={S.td}>
+                  <textarea
+                    style={S.cellInput}
+                    value={row.rowData?.[c.key] ?? ''}
+                    onChange={async e => {
+                      const v = e.target.value;
+                      setProjRows(rs => rs.map(r => r.id === row.id ? { ...r, rowData: { ...r.rowData, [c.key]: v } } : r));
+                    }}
+                    onBlur={async () => {
+                      try { await sectionsApi.updateTableRow(projectId, row.id, { rowData: row.rowData }); }
+                      catch (e) { console.error(e); }
+                    }}
+                    rows={1}
+                  />
+                </td>
+              ))}
+              <td style={S.td}>
+                {table.canDeleteRows && (
+                  <button style={S.delRowBtn} onClick={() => deleteRow(row.id)}>✕</button>
                 )}
-                {hasSnoCol && <td style={S.tdSno}>{isVisible ? sno : ''}</td>}
-                {dataCols.map(col => (
-                  <td key={col.key} style={S.td}>
-                    <span style={{ fontSize: '13px', color: '#444', lineHeight: 1.4 }}>
-                      {row.rowData?.[col.key] ?? ''}
-                    </span>
-                  </td>
-                ))}
-                {canDelete && <td style={S.tdCheck}></td>}
-              </tr>
-            );
-          })}
-
-          {/* ── Engineer-added rows ── */}
-          {projectRows.map(row => {
-            const sno = snoMap[`proj-${row.id}`] ?? '';
-            return (
-              <tr key={`proj-${row.id}`} style={{ background: '#fffde7' }}>
-                {canSelect && <td style={S.tdCheck}></td>}
-                {hasSnoCol  && <td style={S.tdSno}>{sno}</td>}
-                {dataCols.map(col => (
-                  <td key={col.key} style={S.td}>
-                    {col.type === 'DROPDOWN' && col.options?.length > 0 ? (
-                      <select
-                        style={{ ...S.cellInput, width: '100%' }}
-                        value={row.rowData?.[col.key] ?? ''}
-                        onChange={e => handleCellChange(row.id, col.key, e.target.value)}
-                        onBlur={() => handleCellBlur(row.id)}
-                      >
-                        <option value="">—</option>
-                        {col.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                      </select>
-                    ) : (
-                      <textarea
-                        rows={1}
-                        style={{ ...S.cellInput, minHeight: '24px', overflowY: 'hidden' }}
-                        value={row.rowData?.[col.key] ?? ''}
-                        onChange={e => {
-                          handleCellChange(row.id, col.key, e.target.value);
-                          // Auto-grow
-                          e.target.style.height = 'auto';
-                          e.target.style.height = e.target.scrollHeight + 'px';
-                        }}
-                        onBlur={() => handleCellBlur(row.id)}
-                      />
-                    )}
-                  </td>
-                ))}
-                {canDelete && (
-                  <td style={S.tdCheck}>
-                    <button
-                      style={S.deleteRowBtn}
-                      onClick={() => handleDeleteRow(row.id)}
-                      title="Delete row"
-                    >✕</button>
-                  </td>
-                )}
-              </tr>
-            );
-          })}
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
-
-      {canAdd && (
-        <button style={S.addRowBtn} onClick={handleAddRow}>
-          + Add row
-        </button>
+      {table.canAddRows && (
+        <button style={S.addRowBtn} onClick={addRow}>+ Add row</button>
       )}
     </div>
   );
 }
 
-// ─── CHECK LIST COMPONENT ─────────────────────────────────────────────────────
-// Used for sections with SectionContentItems (3.3 Statutory Provisions, 4.8 Clean Agent)
-function CheckList({ projectId, sectionId, items: initialItems, onSavedFlash }) {
-  const [items, setItems] = useState(initialItems ?? []);
-  // addableText: { [itemId]: string } — free text for ADDABLE items being typed
-  const [addableText, setAddableText] = useState({});
+// ─── CHECKLIST ────────────────────────────────────────────────────────────────
+function CheckList({ projectId, sectionId }) {
+  const [items, setItems] = useState(null);
 
-  // ── Toggle a CHECKBOX item ─────────────────────────────────────────────
-  const handleToggle = useCallback(async (itemId, isSelected) => {
-    setItems(prev => prev.map(it => it.id === itemId ? { ...it, isSelected } : it));
-    try {
-      await sectionsApi.saveContentSelections(projectId, { [itemId]: { isSelected } });
-      onSavedFlash();
-    } catch (e) {
-      console.error('contentselection toggle error:', e);
-      setItems(prev => prev.map(it => it.id === itemId ? { ...it, isSelected: !isSelected } : it));
-    }
-  }, [projectId, onSavedFlash]);
+  useEffect(() => {
+    if (!sectionId) return;
+    sectionsApi.getContentSelections(projectId, sectionId)
+      .then(d => setItems(d.items || []))
+      .catch(console.error);
+  }, [projectId, sectionId]);
 
-  // ── Add a free-text entry under an ADDABLE item ────────────────────────
-  // We store it as a new CHECKBOX-style item locally; for now just flash saved
-  // (full ADDABLE persistence is a Phase 5+ enhancement — structure TBD)
-  const handleAddEntry = useCallback((parentItemId) => {
-    const text = (addableText[parentItemId] ?? '').trim();
-    if (!text) return;
-    const fakeId = Date.now(); // local only until backend ADDABLE support lands
-    setItems(prev => {
-      const idx = prev.findIndex(it => it.id === parentItemId);
-      const newItem = { id: fakeId, itemType: 'CHECKBOX', label: text, isSelected: true, _isUserAdded: true };
-      const copy = [...prev];
-      copy.splice(idx + 1, 0, newItem);
-      return copy;
-    });
-    setAddableText(prev => ({ ...prev, [parentItemId]: '' }));
-    onSavedFlash();
-  }, [addableText, onSavedFlash]);
+  if (!items) return <div style={{ fontSize: '12px', color: '#aaa', padding: '8px 0' }}>Loading…</div>;
+
+  async function toggle(itemId, val) {
+    setItems(is => is.map(i => i.id === itemId ? { ...i, isSelected: val } : i));
+    try { await sectionsApi.saveContentSelections(projectId, { [itemId]: { isSelected: val } }); }
+    catch (e) { console.error(e); }
+  }
 
   return (
-    <div style={S.checkListWrap}>
+    <div style={S.clItemWrap}>
       {items.map(item => (
-        <div key={item.id}>
-          {item.itemType === 'CHECKBOX' || item.itemType === 'FIXED' ? (
-            <div style={S.checkListItem}>
-              <input
-                type="checkbox"
-                checked={item.isSelected ?? true}
-                disabled={item.itemType === 'FIXED'}
-                onChange={e => handleToggle(item.id, e.target.checked)}
-                style={{ marginTop: '2px', cursor: item.itemType === 'FIXED' ? 'not-allowed' : 'pointer', flexShrink: 0 }}
-              />
-              <span style={{ ...S.checkListLabel, color: item.isSelected ? '#333' : '#bbb', textDecoration: item.isSelected ? 'none' : 'line-through' }}>
-                {item.label}
-              </span>
-            </div>
-          ) : item.itemType === 'ADDABLE' ? (
-            <div>
-              <div style={{ ...S.checkListItem, fontWeight: 600, color: '#555' }}>
-                <span style={{ fontSize: '13px' }}>{item.label}</span>
-              </div>
-              <div style={{ paddingLeft: '24px' }}>
-                <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-                  <input
-                    type="text"
-                    placeholder="Add new entry…"
-                    value={addableText[item.id] ?? ''}
-                    onChange={e => setAddableText(prev => ({ ...prev, [item.id]: e.target.value }))}
-                    onKeyDown={e => { if (e.key === 'Enter') handleAddEntry(item.id); }}
-                    style={{ ...S.inputBase, height: '32px', flex: 1 }}
-                  />
-                  <button style={{ ...S.addItemBtn, marginTop: 0 }} onClick={() => handleAddEntry(item.id)}>
-                    + Add
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : null}
+        <div key={item.id} style={S.clItem}>
+          <input
+            type="checkbox"
+            checked={!!item.isSelected}
+            onChange={e => toggle(item.id, e.target.checked)}
+            style={{ marginTop: '2px', flexShrink: 0 }}
+          />
+          <span style={S.clLabel}>{item.label}{item.bodyText && <><br /><span style={{ color: '#999', fontSize: '11px' }}>{item.bodyText}</span></>}</span>
         </div>
       ))}
-    </div>
-  );
-}
-
-// ─── TEXT PLUS TABLE COMPONENT ────────────────────────────────────────────────
-// Sections that have BOTH field(s) AND a table (e.g. 4.3, 4.7, 4.8.1, 4.5.x)
-function TextPlusTable({ projectId, sectionFields, allFieldValues, onFieldChange, onFieldBlur, savingFields, tableData, onSavedFlash, onTableChange }) {
-  return (
-    <div>
-      {sectionFields.map(field => (
-        <FieldRow
-          key={field.fieldId}
-          field={field}
-          value={allFieldValues[field.fieldId] ?? ''}
-          onChange={onFieldChange}
-          onBlur={onFieldBlur}
-          saving={!!savingFields[field.fieldId]}
-        />
-      ))}
-      {tableData && (
-        <CheckTable
-          projectId={projectId}
-          tableData={tableData}
-          onSavedFlash={onSavedFlash}
-          onTableChange={onTableChange}
-        />
-      )}
     </div>
   );
 }
 
 // ─── SECTION CONTENT PANEL ────────────────────────────────────────────────────
-// Decides which editor to render based on the section's shape.
-// Handles its own data loading (table rows + content selections) per section.
-function SectionContentPanel({ projectId, section, sectionFields, allFieldValues, onFieldChange, onFieldBlur, savingFields, onSavedFlash, onTableChange }) {
-  const [tableData,     setTableData]     = useState(null);
-  const [contentItems,  setContentItems]  = useState(null);
-  const [panelLoading,  setPanelLoading]  = useState(false);
-  const [panelError,    setPanelError]    = useState('');
+function SectionContentPanel({ projectId, section, sectionFields, allFieldValues, onFieldChange, onFieldBlur, savingFields }) {
+  const hasTables   = section.sectionTables?.length > 0;
+  const hasContent  = section.contentItems?.length > 0;
+  const hasFields   = sectionFields?.length > 0;
 
-  const hasFields  = sectionFields.length > 0;
-  const hasTables  = (section.sectionTables ?? []).length > 0;
-  const hasContent = (section.contentItems ?? []).length > 0;
-
-  // Load table rows + content selections when section changes
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      setTableData(null);
-      setContentItems(null);
-      setPanelError('');
-
-      if (!hasTables && !hasContent) return;
-
-      setPanelLoading(true);
-      try {
-        const promises = [];
-
-        // Load first table (most sections have exactly one table per section)
-        if (hasTables) {
-          const firstTable = section.sectionTables[0];
-          promises.push(sectionsApi.getTableRows(projectId, firstTable.id));
-        } else {
-          promises.push(Promise.resolve(null));
-        }
-
-        // Load content selections if section has content items
-        if (hasContent) {
-          promises.push(sectionsApi.getContentSelections(projectId, section.id));
-        } else {
-          promises.push(Promise.resolve(null));
-        }
-
-        const [tblData, contentData] = await Promise.all(promises);
-        if (cancelled) return;
-
-        if (tblData)     setTableData(tblData);
-        if (contentData) setContentItems(contentData.items ?? []);
-      } catch (e) {
-        if (!cancelled) setPanelError(e.message || 'Failed to load section data');
-      } finally {
-        if (!cancelled) setPanelLoading(false);
-      }
-    }
-    load();
-    return () => { cancelled = true; };
-  }, [projectId, section.id, hasTables, hasContent]);
-
-  if (section.isHeadingOnly) {
-    return (
-      <div style={{ color: '#aaa', fontSize: '14px', fontStyle: 'italic' }}>
-        This is a structural heading. Select a sub-section to edit its fields.
-      </div>
-    );
-  }
-
-  if (panelLoading) {
-    return <div style={{ color: '#aaa', fontSize: '13px', padding: '12px 0' }}>Loading section data…</div>;
-  }
-
-  if (panelError) {
-    return <div style={{ color: '#c62828', fontSize: '13px', padding: '12px 0' }}>⚠ {panelError}</div>;
-  }
-
-  // ── Routing logic ─────────────────────────────────────────────────────
-  // Priority: contentItems → TextPlusTable → CheckTable → fields only
-
-  // Content items (CheckList) — rendered above fields if both exist
-  const checkList = hasContent && contentItems !== null ? (
-    <CheckList
-      key={`checklist-${section.id}`}
-      projectId={projectId}
-      sectionId={section.id}
-      items={contentItems}
-      onSavedFlash={onSavedFlash}
-    />
-  ) : null;
-
-  // Table section
-  if (hasTables && hasFields) {
-    return (
-      <div>
-        {checkList}
-        <TextPlusTable
-          projectId={projectId}
+  return (
+    <div>
+      {hasTables && section.sectionTables.map(t => (
+        <CheckTable key={t.id} projectId={projectId} table={t} snoFormat={t.snoFormat} />
+      ))}
+      {hasContent && (
+        <CheckList projectId={projectId} sectionId={section.id} />
+      )}
+      {hasFields && (
+        <FieldEditorPanel
+          section={section}
           sectionFields={sectionFields}
           allFieldValues={allFieldValues}
           onFieldChange={onFieldChange}
           onFieldBlur={onFieldBlur}
           savingFields={savingFields}
-          tableData={tableData}
-          onSavedFlash={onSavedFlash}
-          onTableChange={onTableChange}
         />
-      </div>
-    );
-  }
-
-  if (hasTables && !hasFields) {
-    return (
-      <div>
-        {checkList}
-        {tableData && (
-          <CheckTable
-            key={`checktable-${section.id}-${tableData.tableId}`}
-            projectId={projectId}
-            tableData={tableData}
-            onSavedFlash={onSavedFlash}
-            onTableChange={onTableChange}
-          />
-        )}
-      </div>
-    );
-  }
-
-  // Fields only (or content items only)
-  return (
-    <div>
-      {checkList}
-      {sectionFields.length === 0 && !hasContent && (
-        <div style={S.noFields}>No editable fields for this section.</div>
       )}
-      {sectionFields.map(field => (
-        <FieldRow
-          key={field.fieldId}
-          field={field}
-          value={allFieldValues[field.fieldId] ?? ''}
-          onChange={onFieldChange}
-          onBlur={onFieldBlur}
-          saving={!!savingFields[field.fieldId]}
-        />
-      ))}
+      {!hasTables && !hasContent && !hasFields && (
+        <p style={{ color: '#bbb', fontSize: '13px', fontStyle: 'italic' }}>
+          This section has no configurable content. Review the template and mark as reviewed below.
+        </p>
+      )}
     </div>
   );
 }
 
-// ─── MAIN EDITOR COMPONENT ────────────────────────────────────────────────────
+// ─── STANDARDS PANEL ─────────────────────────────────────────────────────────
+function StandardsPanel({ hint }) {
+  const [open,     setOpen]     = useState(false);
+  const [loading,  setLoading]  = useState(false);
+  const [stdData,  setStdData]  = useState(null);
+  const [lastHint, setLastHint] = useState(null);
+
+  useEffect(() => {
+    if (!open || !hint || hint === lastHint) return;
+    setLoading(true); setLastHint(hint);
+    standardsApi.getByHint(hint)
+      .then(d => setStdData(d.standards || []))
+      .catch(() => setStdData([]))
+      .finally(() => setLoading(false));
+  }, [open, hint, lastHint]);
+
+  // Reset when hint changes and panel is open
+  useEffect(() => {
+    if (open && hint !== lastHint) setStdData(null);
+  }, [hint]);
+
+  if (!hint) return null;
+
+  return (
+    <div style={S.stdPanel}>
+      <div style={S.stdHeader} onClick={() => setOpen(o => !o)}>
+        <span>📚 Standards Reference · <span style={{ fontWeight: 400, opacity: 0.7 }}>{hint}</span></span>
+        <span>{open ? '▲' : '▼'}</span>
+      </div>
+      {open && (
+        <div style={S.stdBody}>
+          {loading && <div style={S.stdLoading}>Loading standards…</div>}
+          {!loading && stdData && stdData.length === 0 && (
+            <div style={S.stdEmpty}>No standards linked to section {hint}. Admin can add standards via the Admin panel.</div>
+          )}
+          {!loading && stdData && stdData.map(s => (
+            <div key={s.id} style={S.stdCard}>
+              <div>
+                <span style={S.stdCode}>{s.standardCode}</span>
+                {s.clause && <span style={S.stdClause}>{s.clause}</span>}
+              </div>
+              <div style={S.stdTitle}>{s.title}</div>
+              <div style={S.stdBody_}>{s.body}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EDITOR — main component
+// ═══════════════════════════════════════════════════════════════════════════════
 export default function Editor() {
   const { projectId } = useParams();
   const navigate      = useNavigate();
 
-  const [project,          setProject]          = useState(null);
-  const [treeData,         setTreeData]         = useState(null);
-  const [enabledToggleIds, setEnabledToggleIds] = useState(new Set());
-  const [allFieldValues,   setAllFieldValues]   = useState({});
-  const [fieldMeta,        setFieldMeta]        = useState([]);
-  const [activeSection,    setActiveSection]    = useState(null);
-  const [collapsed,        setCollapsed]        = useState({});
-  const [savingFields,     setSavingFields]     = useState({});
-  const [savedFlash,       setSavedFlash]       = useState(false);
-  const [loading,          setLoading]          = useState(true);
-  const [error,            setError]            = useState('');
-  const [generating,       setGenerating]       = useState(false);
-  const [generatingPdf,    setGeneratingPdf]    = useState(false);
-  const [genError,         setGenError]         = useState('');
-  const [revisionPanelOpen, setRevisionPanelOpen] = useState(false); // Phase 7
-  const [clauseMarks,       setClauseMarks]       = useState([]);    // for CompilerPanel
-  const [missingFields,     setMissingFields]     = useState(null);  // Phase 9: 422 modal
-  const [pendingFmt,        setPendingFmt]        = useState('docx');// Phase 9: fmt for force-generate
-  const [previewTick,       setPreviewTick]       = useState(0);     // bumped to re-render preview on table changes
+  const [project,       setProject]       = useState(null);
+  const [treeData,      setTreeData]      = useState(null);
+  const [activeSection, setActiveSection] = useState(null);
+  const [sectionFields, setSectionFields] = useState([]);
+  const [allFieldValues,setAllFieldValues]= useState({});
+  const [fieldMeta,     setFieldMeta]     = useState([]);
+  const [collapsed,     setCollapsed]     = useState({});
+  const [clauseMarks,   setClauseMarks]   = useState([]);
+  const [savingFields,  setSavingFields]  = useState(new Set());
+  const [savedFlash,    setSavedFlash]    = useState(false);
+  const [generating,    setGenerating]    = useState(false);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [genError,      setGenError]      = useState('');
+  const [revisionPanelOpen, setRevisionPanelOpen] = useState(false);
+  const [error,         setError]         = useState('');
 
-  const dirtyRef       = useRef({});
-  // liveTableData: tableId → { seedRows, projectRows }
-  // Updated by CheckTable on every local state change — drives CompilerPanel in real time
-  const liveTableData  = useRef({});
+  // Review workflow state
+  const [reviewedIds,  setReviewedIds]  = useState(new Set()); // DB-persisted reviews
+  const [visitedIds,   setVisitedIds]   = useState(new Set()); // session-visited (not yet reviewed)
+  const [reviewBusy,   setReviewBusy]   = useState(false);
 
-  // ── Compute section completion status from fieldMeta ──────────────────
-  // green  = section has mandatory fields and all are filled
-  // amber  = section has mandatory fields and at least one is empty
-  // grey   = section has no mandatory non-FIXED fields (heading-only or all fixed)
-  // undefined = section has no fields at all (show no dot)
-  const completionMap = useMemo(() => {
-    const map = {};
-    // Group mandatory non-FIXED fields by sectionId
-    const bySection = {};
-    for (const f of fieldMeta) {
-      if (!f.mandatory || f.valueType === 'FIXED') continue;
-      if (!bySection[f.sectionId]) bySection[f.sectionId] = { total: 0, filled: 0 };
-      bySection[f.sectionId].total++;
-      const val = allFieldValues[f.fieldId];
-      if (val !== undefined && val !== null && String(val).trim() !== '') {
-        bySection[f.sectionId].filled++;
-      }
-    }
-    for (const [sectionId, { total, filled }] of Object.entries(bySection)) {
-      map[Number(sectionId)] = filled === total ? 'green' : 'amber';
-    }
-    return map;
-  }, [fieldMeta, allFieldValues]);
+  const saveTimer = useRef({});
 
-  // ── Flash "✓ Saved" in nav ─────────────────────────────────────────────
-  const flashSaved = useCallback(() => {
-    setSavedFlash(true);
-    setTimeout(() => setSavedFlash(false), 2000);
-  }, []);
+  // ── Load project metadata ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (!projectId) return;
+    const id = parseInt(projectId);
 
-  // ── Load project, tree, and all field values on mount ─────────────────
-  const loadAll = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const [proj, tree, valuesRes] = await Promise.all([
-        projectsApi.get(projectId),
-        sectionsApi.tree(projectId),
-        fieldsApi.getValues(projectId),
-      ]);
-
+    Promise.all([
+      projectsApi.get(id),
+      sectionsApi.tree(id),
+      fieldsApi.getValues(id),
+      revisionsApi.getMarks(id).catch(() => ({ marks: [] })),
+      reviewsApi.getAll(id).catch(() => ({ reviewedSectionIds: [] })),
+    ]).then(([proj, tree, vals, marks, revs]) => {
       setProject(proj);
       setTreeData(tree);
-      setEnabledToggleIds(new Set(tree.enabledToggleIds ?? []));
+      const valMap = {};
+      (vals.values || []).forEach(f => { valMap[f.fieldId] = f.resolvedValue; });
+      setAllFieldValues(valMap);
+      setFieldMeta(vals.values || []);
+      setClauseMarks(marks.marks || []);
+      setReviewedIds(new Set(revs.reviewedSectionIds || []));
+    }).catch(e => {
+      console.error(e);
+      if (e.message?.includes('Access denied') || e.message?.includes('not found')) {
+        setError(e.message);
+      }
+    });
+  }, [projectId]);
 
-      const valueMap = {};
-      (valuesRes.values ?? []).forEach(f => { valueMap[f.fieldId] = f.resolvedValue; });
-      setAllFieldValues(valueMap);
-      setFieldMeta(valuesRes.values ?? []);
-    } catch (e) {
-      setError(e.message || 'Failed to load project');
-    } finally {
-      setLoading(false);
+  // ── Merged field meta for live CompilerPanel preview ──────────────────────
+  const mergedFieldMeta = useMemo(() => {
+    return fieldMeta.map(f => ({
+      ...f,
+      resolvedValue: allFieldValues[f.fieldId] !== undefined
+        ? String(allFieldValues[f.fieldId])
+        : f.resolvedValue,
+    }));
+  }, [fieldMeta, allFieldValues]);
+
+  // ── Review dot helper ──────────────────────────────────────────────────────
+  const reviewStatus = useCallback((sectionId) => {
+    if (reviewedIds.has(sectionId)) return 'reviewed';
+    if (visitedIds.has(sectionId)) return 'visited';
+    return 'unvisited';
+  }, [reviewedIds, visitedIds]);
+
+  // ── Review progress ────────────────────────────────────────────────────────
+  const activeSections   = useMemo(() => getActiveContentSections(treeData), [treeData]);
+  const reviewedCount    = useMemo(() => activeSections.filter(s => reviewedIds.has(s.id)).length, [activeSections, reviewedIds]);
+  const reviewPct        = activeSections.length ? Math.round((reviewedCount / activeSections.length) * 100) : 0;
+
+  // ── Select section ─────────────────────────────────────────────────────────
+  const handleSelectSection = useCallback((node) => {
+    setActiveSection(node);
+    // Mark as visited (amber) if not already reviewed
+    if (!reviewedIds.has(node.id)) {
+      setVisitedIds(prev => new Set([...prev, node.id]));
     }
-  }, [projectId]);
+    // Collect fields for this section from fieldMeta
+    const secFields = fieldMeta.filter(f => f.sectionId === node.id);
+    setSectionFields(secFields);
+  }, [fieldMeta, reviewedIds]);
 
-  useEffect(() => { loadAll(); }, [loadAll]);
-
-  // ── Load clause marks for the compiler panel (Phase 8) ────────────────
-  useEffect(() => {
-    revisionsApi.getMarks(projectId)
-      .then(data => setClauseMarks(data.marks ?? []))
-      .catch(() => {});
-  }, [projectId]);
-
-  // ── Handle section click from CompilerPanel (jump to section in outline) ─
+  // ── Section click from CompilerPanel preview ───────────────────────────────
   const handleSectionClickFromPreview = useCallback((sectionId) => {
     if (!treeData) return;
     function findNode(nodes) {
       for (const n of nodes) {
         if (n.id === sectionId) return n;
-        if (n.children?.length) {
-          const found = findNode(n.children);
-          if (found) return found;
-        }
+        if (n.children?.length) { const found = findNode(n.children); if (found) return found; }
       }
       return null;
     }
-    const node = findNode(treeData.sections ?? []);
-    if (node) setActiveSection(node);
-  }, [treeData]);
+    const node = findNode(treeData.sections || []);
+    if (node && !node.isHeadingOnly && node.isEnabled !== false) handleSelectSection(node);
+  }, [treeData, handleSelectSection]);
 
-  // ── Re-fetch only tree + values (used after toggle changes) ───────────
-  const refreshTreeAndValues = useCallback(async () => {
+  // ── Toggle section visibility ─────────────────────────────────────────────
+  const handleToggleSection = useCallback(async (sectionId, newEnabled, visibilityRule) => {
+    if (!newEnabled && visibilityRule === 'ALWAYS') {
+      if (!window.confirm(
+        'This is a core section. Hiding it will remove it from the generated document.\n\nAre you sure?'
+      )) return;
+    }
+    // Optimistic update
+    setTreeData(prev => prev ? {
+      ...prev,
+      sections: updateTreeEnabled(prev.sections, sectionId, newEnabled),
+    } : prev);
+
     try {
-      const [tree, valuesRes] = await Promise.all([
-        sectionsApi.tree(projectId),
-        fieldsApi.getValues(projectId),
-      ]);
+      await sectionsApi.saveToggles(parseInt(projectId), { [sectionId]: newEnabled });
+      // Reload tree to get accurate enabledToggleIds
+      const tree = await sectionsApi.tree(parseInt(projectId));
       setTreeData(tree);
-      setEnabledToggleIds(new Set(tree.enabledToggleIds ?? []));
-
-      const valueMap = {};
-      (valuesRes.values ?? []).forEach(f => { valueMap[f.fieldId] = f.resolvedValue; });
-      setAllFieldValues(valueMap);
-      setFieldMeta(valuesRes.values ?? []);
-
-      if (activeSection) {
-        const flat = flattenTree(tree.sections ?? []);
-        const stillVisible = flat.some(s => s.id === activeSection.id);
-        if (!stillVisible) setActiveSection(null);
+      // If disabling a reviewed section, remove its review locally
+      if (!newEnabled) {
+        setReviewedIds(prev => { const n = new Set(prev); n.delete(sectionId); return n; });
+        setVisitedIds(prev => { const n = new Set(prev); n.delete(sectionId); return n; });
       }
     } catch (e) {
-      console.error('Refresh error:', e);
+      console.error('Toggle section failed:', e);
+      // Revert
+      setTreeData(prev => prev ? {
+        ...prev,
+        sections: updateTreeEnabled(prev.sections, sectionId, !newEnabled),
+      } : prev);
     }
-  }, [projectId, activeSection]);
+  }, [projectId]);
 
-  function flattenTree(nodes, acc = []) {
-    for (const n of nodes) {
-      acc.push(n);
-      if (n.children?.length) flattenTree(n.children, acc);
-    }
-    return acc;
-  }
-
+  // ── Toggle collapse ────────────────────────────────────────────────────────
   const handleToggleCollapse = useCallback((id) => {
     setCollapsed(prev => ({ ...prev, [id]: !prev[id] }));
   }, []);
 
-  const handleToggleSection = useCallback(async (sectionId, enabled) => {
-    try {
-      await sectionsApi.saveToggles(projectId, { [sectionId]: enabled });
-      await refreshTreeAndValues();
-    } catch (e) {
-      console.error('Toggle save error:', e);
-    }
-  }, [projectId, refreshTreeAndValues]);
-
+  // ── Field change (immediate state update) ─────────────────────────────────
   const handleFieldChange = useCallback((fieldId, value) => {
     setAllFieldValues(prev => ({ ...prev, [fieldId]: value }));
-    dirtyRef.current[fieldId] = value;
   }, []);
 
-  const handleFieldBlur = useCallback(async (fieldId, value) => {
-    if (!(fieldId in dirtyRef.current)) return;
-    delete dirtyRef.current[fieldId];
+  // ── Field blur (debounced save) ────────────────────────────────────────────
+  const flashSaved = useCallback(() => {
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1800);
+  }, []);
 
-    setSavingFields(prev => ({ ...prev, [fieldId]: true }));
-    try {
-      await fieldsApi.saveValues(projectId, { [fieldId]: value });
-      setFieldMeta(prev => prev.map(f =>
-        f.fieldId === fieldId ? { ...f, resolvedValue: value, _hasUserValue: true } : f
-      ));
-      flashSaved();
-    } catch (e) {
-      console.error('Save field error:', e);
-    } finally {
-      setSavingFields(prev => ({ ...prev, [fieldId]: false }));
-    }
+  const handleFieldBlur = useCallback((fieldId, value) => {
+    if (saveTimer.current[fieldId]) clearTimeout(saveTimer.current[fieldId]);
+    saveTimer.current[fieldId] = setTimeout(async () => {
+      setSavingFields(prev => new Set([...prev, fieldId]));
+      try {
+        await fieldsApi.saveValues(parseInt(projectId), { [fieldId]: value });
+        flashSaved();
+      } catch (e) {
+        console.error('Save field failed:', e);
+      } finally {
+        setSavingFields(prev => { const n = new Set(prev); n.delete(fieldId); return n; });
+      }
+    }, 600);
   }, [projectId, flashSaved]);
 
-  const handleSelectSection = useCallback((node) => {
-    setActiveSection(node);
-  }, []);
-
-  // ── Live table data sync → CompilerPanel ──────────────────────────────
-  // Called by CheckTable whenever its local seedRows/projectRows change.
-  // Uses a ref (no re-render overhead) + a lightweight tick to notify preview.
-  const handleTableChange = useCallback((tableId, { seedRows, projectRows }) => {
-    liveTableData.current[tableId] = { seedRows, projectRows };
-    setPreviewTick(t => t + 1);
-  }, []);
-
-  const sectionFields = activeSection
-    ? fieldMeta.filter(f => f.sectionId === activeSection.id)
-    : [];
-
-  // Build section meta line
-  // ── Document generation ────────────────────────────────────────────────
-  const handleGenerate = useCallback(async (fmt = 'docx', force = false) => {
-    const isPdf = fmt === 'pdf';
-    if (isPdf) setGeneratingPdf(true); else setGenerating(true);
-    setGenError('');
+  // ── Mark section as reviewed ───────────────────────────────────────────────
+  const handleMarkReviewed = useCallback(async () => {
+    if (!activeSection || reviewBusy) return;
+    setReviewBusy(true);
     try {
-      const res  = await generateDocument(projectId, fmt, force);
+      await reviewsApi.mark(parseInt(projectId), activeSection.id);
+      setReviewedIds(prev => new Set([...prev, activeSection.id]));
+      setVisitedIds(prev => { const n = new Set(prev); n.delete(activeSection.id); return n; });
+    } catch (e) {
+      console.error('Mark reviewed failed:', e);
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [activeSection, projectId, reviewBusy]);
+
+  const handleUnmarkReviewed = useCallback(async () => {
+    if (!activeSection || reviewBusy) return;
+    setReviewBusy(true);
+    try {
+      await reviewsApi.unmark(parseInt(projectId), activeSection.id);
+      setReviewedIds(prev => { const n = new Set(prev); n.delete(activeSection.id); return n; });
+      setVisitedIds(prev => new Set([...prev, activeSection.id]));
+    } catch (e) {
+      console.error('Unmark reviewed failed:', e);
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [activeSection, projectId, reviewBusy]);
+
+  // ── Generate document ──────────────────────────────────────────────────────
+  const handleGenerate = useCallback(async (fmt = 'docx') => {
+    // Hard-block: all active sections must be reviewed
+    const unreviewed = activeSections.filter(s => !reviewedIds.has(s.id));
+    if (unreviewed.length > 0) {
+      const list = unreviewed.map(s => `• ${s.numberHint || ''} ${s.titleTemplate}`).join('\n');
+      alert(
+        `Cannot generate — ${unreviewed.length} section${unreviewed.length !== 1 ? 's' : ''} not yet reviewed:\n\n${list}\n\n` +
+        `Please open each section, verify its content, and click "Mark as Reviewed".`
+      );
+      return;
+    }
+
+    if (fmt === 'pdf') setGeneratingPdf(true); else setGenerating(true);
+    setGenError('');
+
+    try {
+      const res  = await generateDocument(parseInt(projectId), fmt);
       const blob = await res.blob();
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
-      const cd   = res.headers.get('content-disposition') || '';
-      const match = cd.match(/filename="([^"]+)"/);
       a.href     = url;
-      a.download = match ? match[1] : `${project?.name || 'document'}_Rev${project?.revision || '0'}.${fmt}`;
-      document.body.appendChild(a);
+      a.download = `${project?.name || 'document'}_Rev${project?.revision || '0'}.${fmt}`;
       a.click();
-      document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (e) {
-      if (e instanceof ValidationError) {
-        // Show the missing fields modal instead of an inline error
-        setMissingFields(e.missingFields);
-        setPendingFmt(fmt);
-      } else {
-        setGenError(e.message || 'Generation failed');
-      }
+      setGenError(e.message || 'Generation failed');
     } finally {
-      if (isPdf) setGeneratingPdf(false); else setGenerating(false);
+      setGenerating(false); setGeneratingPdf(false);
     }
-  }, [projectId, project]);
+  }, [activeSections, reviewedIds, projectId, project]);
 
-  function buildMetaLine(section, fields) {
-    if (section.isHeadingOnly) return 'Heading-only section — no editable fields';
-    const parts = [];
-    if (fields.length > 0) parts.push(`${fields.length} field${fields.length !== 1 ? 's' : ''}`);
-    if ((section.sectionTables ?? []).length > 0) parts.push(`${section.sectionTables.length} table${section.sectionTables.length !== 1 ? 's' : ''}`);
-    if ((section.contentItems ?? []).length > 0) parts.push(`${section.contentItems.length} content item${section.contentItems.length !== 1 ? 's' : ''}`);
-    return parts.length > 0 ? parts.join(' · ') : 'No editable content';
-  }
+  // ─────────────────────────────────────────────────────────────────────────
 
-  if (loading) {
-    return (
-      <div style={S.page}>
-        <nav style={S.nav}><h2 style={S.navTitle}>🔥 Firewater</h2></nav>
-        <div style={{ padding: '40px', color: '#888' }}>Loading project…</div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={S.page}>
-        <nav style={S.nav}><h2 style={S.navTitle}>🔥 Firewater</h2></nav>
-        <div style={S.errBox}>⚠ {error}</div>
-      </div>
-    );
-  }
+  if (error) return <div style={S.errBox}>⚠ {error}</div>;
+  if (!project || !treeData) return (
+    <div style={{ ...S.page, alignItems: 'center', justifyContent: 'center', color: '#aaa', fontSize: '15px' }}>
+      Loading…
+    </div>
+  );
 
   const typeCode = project?.projectType?.code;
+  const isActiveReviewed = activeSection ? reviewedIds.has(activeSection.id) : false;
+  const currentUser = JSON.parse(localStorage.getItem('fw_user') || 'null');
 
   return (
     <div style={S.page}>
-      {/* NAV */}
+
+      {/* ── NAV ─────────────────────────────────────────────────────────── */}
       <nav style={S.nav}>
-        <div style={S.navLeft}>
-          <div style={S.navLogo}>
-            <span style={S.navLogoFlame}>🔥</span>
-            <span style={S.navLogoText}>Firewater</span>
-          </div>
-          <div style={S.navDivider} />
+        <div style={S.navL}>
+          <h2 style={S.navTitle}>🔥 Firewater</h2>
           <button style={S.btnBack} onClick={() => navigate('/dashboard')}>← Dashboard</button>
-          <div style={S.navDivider} />
-          <span style={S.navName} title={project?.name}>{project?.name}</span>
+          <span style={S.navName}>{project?.name}</span>
           {typeCode && (
             <span style={{ ...S.navBadge, background: TYPE_COLORS[typeCode] || '#555' }}>
               {project.projectType.name}
@@ -1101,79 +831,50 @@ export default function Editor() {
           )}
           <span style={{ ...S.navSaved, opacity: savedFlash ? 1 : 0 }}>✓ Saved</span>
         </div>
-        <div style={S.navRight}>
+        <div style={S.navR}>
           {genError && <span style={S.genError} title={genError}>⚠ {genError}</span>}
-          <button style={S.btnRevisions} onClick={() => setRevisionPanelOpen(true)}>
-            Revisions
-          </button>
-          {JSON.parse(localStorage.getItem('fw_user') || 'null')?.role === 'ADMIN' && (
-            <button style={S.btnAdmin} onClick={() => navigate('/admin')}>Admin</button>
+          <button style={S.btnRevisions} onClick={() => setRevisionPanelOpen(true)}>📋 Revisions</button>
+          {currentUser?.role === 'ADMIN' && (
+            <button style={S.btnAdmin} onClick={() => navigate('/admin')}>⚙ Admin</button>
           )}
           <button
-            style={{ ...S.btnGeneratePdf, opacity: generatingPdf ? 0.55 : 1, cursor: generatingPdf ? 'not-allowed' : 'pointer' }}
+            style={{ ...S.btnPdf, opacity: generatingPdf ? 0.65 : 1, cursor: generatingPdf ? 'not-allowed' : 'pointer' }}
             onClick={() => handleGenerate('pdf')}
             disabled={generatingPdf || generating}
           >
-            {generatingPdf ? '⏳ PDF…' : '⬇ PDF'}
+            {generatingPdf ? '⏳…' : '⬇ PDF'}
           </button>
           <button
-            style={{ ...S.btnGenerate, opacity: generating ? 0.55 : 1, cursor: generating ? 'not-allowed' : 'pointer' }}
+            style={{ ...S.btnGenerate, opacity: generating ? 0.65 : 1, cursor: generating ? 'not-allowed' : 'pointer' }}
             onClick={() => handleGenerate('docx')}
             disabled={generating || generatingPdf}
           >
-            {generating ? '⏳ Word…' : '⬇ Word (.docx)'}
+            {generating ? '⏳ Generating…' : '⬇ Word (.docx)'}
           </button>
         </div>
       </nav>
 
-      {/* REVISION MANAGER PANEL — Phase 7 */}
+      {/* ── REVISION PANEL ──────────────────────────────────────────────── */}
       <RevisionManager
         projectId={parseInt(projectId)}
         isOpen={revisionPanelOpen}
         onClose={() => setRevisionPanelOpen(false)}
       />
 
-      {/* MISSING FIELDS MODAL — Phase 9 */}
-      {missingFields && (
-        <div style={S.modalOverlay} onClick={() => setMissingFields(null)}>
-          <div style={S.modalBox} onClick={e => e.stopPropagation()}>
-            <h2 style={S.modalTitle}>⚠ Mandatory Fields Incomplete</h2>
-            <p style={S.modalSubtitle}>
-              {missingFields.length} mandatory field{missingFields.length !== 1 ? 's are' : ' is'} empty.
-              Unfilled fields will appear highlighted in the output document.
-            </p>
-            <ul style={S.modalList}>
-              {missingFields.map((f, i) => (
-                <li key={i} style={S.modalListItem}>
-                  <span style={S.modalSectionNo}>{f.sectionNumber}</span>
-                  <div>
-                    <div style={S.modalFieldLabel}>{f.label}</div>
-                    <div style={S.modalSectionTitle}>{f.sectionTitle}</div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-            <div style={S.modalBtns}>
-              <button style={S.btnModalCancel} onClick={() => setMissingFields(null)}>
-                Go Back &amp; Fill
-              </button>
-              <button
-                style={S.btnModalForce}
-                onClick={() => { setMissingFields(null); handleGenerate(pendingFmt, true); }}
-              >
-                Generate Anyway
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       <div style={S.body}>
 
-        {/* ── SIDEBAR ─────────────────────────────────────────── */}
-        <aside style={S.sidebar}>
-          <div style={S.sidebarHeader}>Sections</div>
-          <div style={S.sidebarScroll}>
+        {/* ── LEFT: TABLE OF CONTENTS ─────────────────────────────────── */}
+        <aside style={S.toc}>
+          <div style={S.tocHeader}>
+            <div style={S.tocTitle}>Sections</div>
+            <div style={S.tocProgress}>
+              <div style={S.tocProgFill(reviewPct)} />
+            </div>
+            <div style={S.tocProgText}>
+              {reviewedCount} / {activeSections.length} reviewed{reviewPct === 100 ? ' ✓' : ''}
+            </div>
+          </div>
+          <div style={S.tocScroll}>
             {treeData?.sections?.map(node => (
               <SectionNode
                 key={node.id}
@@ -1183,71 +884,85 @@ export default function Editor() {
                 onSelect={handleSelectSection}
                 collapsed={collapsed}
                 onToggleCollapse={handleToggleCollapse}
-                enabledToggleIds={enabledToggleIds}
                 onToggleSection={handleToggleSection}
-                completionMap={completionMap}
+                reviewStatus={reviewStatus}
               />
             ))}
           </div>
         </aside>
 
-        {/* ── EDITOR COLUMN ───────────────────────────────────── */}
-        <div style={S.editorCol}>
-          <div style={S.colHeader}>✏ Editor</div>
-          <div style={S.sheet}>
-            <div style={S.sheetPad}>
-              {!activeSection ? (
-                <div style={S.placeholder}>
-                  <span style={{ fontSize: '48px' }}>📄</span>
-                  <p style={{ margin: 0, fontSize: '15px' }}>Select a section to begin editing</p>
-                  <p style={{ margin: 0, fontSize: '13px', color: '#bbb' }}>
-                    Toggle optional sections using the switches in the sidebar
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <h1 style={S.sectionPanelTitle}>
-                    <span style={{ color: '#9ca3af', marginRight: '10px', fontSize: '14px', fontFamily: 'monospace', fontWeight: 400 }}>
-                      {activeSection.numberHint}
-                    </span>
-                    {activeSection.titleTemplate}
-                  </h1>
-                  <p style={S.sectionPanelMeta}>
-                    {buildMetaLine(activeSection, sectionFields)}
-                  </p>
-                  <SectionContentPanel
-                    key={activeSection.id}
-                    projectId={projectId}
-                    section={activeSection}
-                    sectionFields={sectionFields}
-                    allFieldValues={allFieldValues}
-                    onFieldChange={handleFieldChange}
-                    onFieldBlur={handleFieldBlur}
-                    savingFields={savingFields}
-                    onSavedFlash={flashSaved}
-                    onTableChange={handleTableChange}
-                  />
-                </>
-              )}
-            </div>
-          </div>
-        </div>
+        {/* ── CENTER: LIVE PREVIEW (CompilerPanel) ────────────────────── */}
+        <main style={S.center}>
+          <CompilerPanel
+            treeData={treeData}
+            fieldMeta={mergedFieldMeta}
+            clauseMarks={clauseMarks}
+            activeSection={activeSection}
+            onSectionClick={handleSectionClickFromPreview}
+          />
+        </main>
 
-        {/* ── PREVIEW COLUMN ──────────────────────────────────── */}
-        <div style={S.previewCol}>
-          <div style={S.colHeader}>📄 Live Preview</div>
-          <div style={{ ...S.sheet, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <CompilerPanel
-              treeData={treeData}
-              fieldMeta={fieldMeta}
-              allFieldValues={allFieldValues}
-              liveTableData={liveTableData.current}
-              clauseMarks={clauseMarks}
-              activeSection={activeSection}
-              onSectionClick={handleSectionClickFromPreview}
-            />
-          </div>
-        </div>
+        {/* ── RIGHT: SECTION EDITOR ───────────────────────────────────── */}
+        <aside style={S.right}>
+          {!activeSection ? (
+            <div style={S.rightEmpty}>
+              <span style={{ fontSize: '40px' }}>📝</span>
+              <p style={{ margin: 0, fontSize: '14px', fontWeight: 600, color: '#888' }}>Select a section</p>
+              <p style={{ margin: 0, fontSize: '12px' }}>
+                Click any section in the TOC to edit it.<br />
+                Use the 👁 icon to show/hide sections.
+              </p>
+              <div style={{ marginTop: '16px', background: '#f0f8f0', borderRadius: '8px', padding: '12px 16px', textAlign: 'left', width: '100%', boxSizing: 'border-box' }}>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#4caf50', marginBottom: '6px' }}>REVIEW WORKFLOW</div>
+                <div style={{ fontSize: '11px', color: '#555', lineHeight: 1.6 }}>
+                  🔘 Grey dot — never opened<br />
+                  🟡 Amber dot — opened, not confirmed<br />
+                  🟢 Green dot — marked as reviewed<br /><br />
+                  All sections must be reviewed before generating the document.
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div style={S.rightScroll}>
+                {/* Section header */}
+                <h2 style={S.secTitle}>
+                  {activeSection.numberHint && <span style={S.secNum}>{activeSection.numberHint}</span>}
+                  {activeSection.titleTemplate}
+                </h2>
+                <p style={S.secMeta}>{buildMetaLine(activeSection, sectionFields)}</p>
+
+                {/* Section content */}
+                <SectionContentPanel
+                  key={activeSection.id}
+                  projectId={projectId}
+                  section={activeSection}
+                  sectionFields={sectionFields}
+                  allFieldValues={allFieldValues}
+                  onFieldChange={handleFieldChange}
+                  onFieldBlur={handleFieldBlur}
+                  savingFields={savingFields}
+                />
+              </div>
+
+              {/* ── Review button + Standards panel (sticky bottom area) */}
+              <div style={S.rightFoot}>
+                {isActiveReviewed ? (
+                  <button style={S.btnAlreadyRev} onClick={handleUnmarkReviewed} disabled={reviewBusy}>
+                    ✅ Reviewed — click to unmark
+                  </button>
+                ) : (
+                  <button style={S.btnReviewed} onClick={handleMarkReviewed} disabled={reviewBusy}>
+                    {reviewBusy ? 'Saving…' : '✓ Mark as Reviewed'}
+                  </button>
+                )}
+              </div>
+
+              {/* Standards Reference panel */}
+              <StandardsPanel hint={activeSection.numberHint} />
+            </>
+          )}
+        </aside>
 
       </div>
     </div>

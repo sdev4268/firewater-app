@@ -63,7 +63,7 @@ model User {
 
 model ProjectType {
   id             Int             @id @default(autoincrement())
-  code           String          @unique // REFINERY | PETROCHEMICAL | LNG | PIPELINE | TANKFARM | UTILITY
+  code           String          @unique
   name           String
   description    String?
   sortOrder      Int             @default(0)
@@ -79,17 +79,19 @@ model Section {
   parent                Section?               @relation("SectionChildren", fields: [parentId], references: [id])
   children              Section[]              @relation("SectionChildren")
   orderIndex            Int                    @default(0)
-  numberHint            String? // e.g. "4.2.2" — reference only, computed live
+  numberHint            String?
   titleTemplate         String
   contentTemplate       String?
   visibilityRule        VisibilityRule         @default(ALWAYS)
   projectTypesWhitelist Json?
   isHeadingOnly         Boolean                @default(false)
+  userCanToggle         Boolean                @default(true)
   notes                 String?
   fields                Field[]
   sectionTables         SectionTable[]
   contentItems          SectionContentItem[]
   toggles               ProjectSectionToggle[]
+  reviews               ProjectSectionReview[]
 }
 
 // ─── FIELDS ──────────────────────────────────────────────────────────────────
@@ -134,10 +136,10 @@ model Project {
   jobNumber            String?
   facilityName         String?
   location             String?
-  // ── Revision tracking ────────────────────────────────────────────────────
-  // Null = tracking OFF. Set to a revisionCode string to auto-mark changes.
+  // Wizard classification JSON: { facilityType, hasStorage, hasPipeline,
+  // hasLNG, isGreenfield, hasDWST, hasJetty, hasTankSystem }
+  classification       Json?
   activeRevisionCode   String?
-  // ─────────────────────────────────────────────────────────────────────────
   createdById          Int
   createdBy            User                     @relation(fields: [createdById], references: [id])
   createdAt            DateTime                 @default(now())
@@ -150,6 +152,7 @@ model Project {
   revisions            RevisionHistory[]
   clauseMarks          ClauseRevisionMark[]
   generationLogs       GenerationLog[]
+  sectionReviews       ProjectSectionReview[]
 }
 
 model ProjectFieldValue {
@@ -170,6 +173,20 @@ model ProjectSectionToggle {
   sectionId Int
   section   Section @relation(fields: [sectionId], references: [id])
   isEnabled Boolean @default(true)
+
+  @@unique([projectId, sectionId])
+}
+
+// ─── SECTION REVIEW TRACKING ─────────────────────────────────────────────────
+
+model ProjectSectionReview {
+  id         Int      @id @default(autoincrement())
+  projectId  Int
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sectionId  Int
+  section    Section  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  reviewedAt DateTime @default(now())
+  reviewedBy String?
 
   @@unique([projectId, sectionId])
 }
@@ -297,4 +314,20 @@ model GenerationLog {
   outputPath  String?
   revision    String?
   generatedBy String?
+}
+
+// ─── STANDARDS REFERENCE ─────────────────────────────────────────────────────
+// Loose coupling via sectionNumberHint string — no FK to Section.
+// Sections can be renumbered freely without breaking standards entries.
+
+model SectionStandard {
+  id                Int      @id @default(autoincrement())
+  sectionNumberHint String   // e.g. "4.2.2" — matches Section.numberHint
+  standardCode      String   // e.g. "OISD-116", "NFPA 11", "PNGRB"
+  clause            String?  // e.g. "Clause 8.2.3"
+  title             String
+  body              String   @db.Text
+  sortOrder         Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 }

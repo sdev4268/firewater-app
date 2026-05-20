@@ -68,23 +68,32 @@ export const generate = {
 
 // ─── REVISIONS ────────────────────────────────────────────────────────────────
 export const revisions = {
-  // Revision History CRUD
-  list:   (id)              => request('GET',    `/projects/${id}/revisions`),
-  create: (id, body)        => request('POST',   `/projects/${id}/revisions`, body),
-  update: (id, code, body)  => request('PUT',    `/projects/${id}/revisions/${encodeURIComponent(code)}`, body),
-  remove: (id, code)        => request('DELETE', `/projects/${id}/revisions/${encodeURIComponent(code)}`),
-
-  // Active revision state
-  setActive:    (id, revisionCode) => request('PATCH', `/projects/${id}/active-revision`, { revisionCode }),
-  stopTracking: (id)               => request('PATCH', `/projects/${id}/active-revision`, { revisionCode: null }),
-
-  // Clause revision marks
-  getMarks:    (id)       => request('GET',    `/projects/${id}/clausemarks`),
-  addMark:     (id, body) => request('POST',   `/projects/${id}/clausemarks`, body),
-  clearMarks:  (id, code) => request('DELETE', `/projects/${id}/clausemarks`, { revisionCode: code }),
+  list:         (id)              => request('GET',    `/projects/${id}/revisions`),
+  create:       (id, body)        => request('POST',   `/projects/${id}/revisions`, body),
+  update:       (id, code, body)  => request('PUT',    `/projects/${id}/revisions/${encodeURIComponent(code)}`, body),
+  remove:       (id, code)        => request('DELETE', `/projects/${id}/revisions/${encodeURIComponent(code)}`),
+  setActive:    (id, revisionCode)=> request('PATCH',  `/projects/${id}/active-revision`, { revisionCode }),
+  stopTracking: (id)              => request('PATCH',  `/projects/${id}/active-revision`, { revisionCode: null }),
+  getMarks:     (id)              => request('GET',    `/projects/${id}/clausemarks`),
+  addMark:      (id, body)        => request('POST',   `/projects/${id}/clausemarks`, body),
+  clearMarks:   (id, code)        => request('DELETE', `/projects/${id}/clausemarks`, { revisionCode: code }),
 };
 
-// ─── ADMIN (Phase 8) ──────────────────────────────────────────────────────────
+// ─── SECTION REVIEWS ──────────────────────────────────────────────────────────
+// "Acknowledge & Commit" workflow — engineers mark sections as reviewed.
+export const reviews = {
+  getAll:    (projectId)            => request('GET',    `/projects/${projectId}/reviews`),
+  mark:      (projectId, sectionId) => request('POST',   `/projects/${projectId}/reviews/${sectionId}`),
+  unmark:    (projectId, sectionId) => request('DELETE', `/projects/${projectId}/reviews/${sectionId}`),
+  clearAll:  (projectId)            => request('DELETE', `/projects/${projectId}/reviews`),
+};
+
+// ─── STANDARDS REFERENCE ──────────────────────────────────────────────────────
+export const standards = {
+  getByHint: (hint) => request('GET', `/standards?hint=${encodeURIComponent(hint)}`),
+};
+
+// ─── ADMIN ────────────────────────────────────────────────────────────────────
 export const admin = {
   // User management
   getUsers:    ()           => request('GET',    '/admin/users'),
@@ -96,20 +105,21 @@ export const admin = {
   getStats:    ()           => request('GET',    '/admin/stats'),
 
   // Dev Mode — sections
-  getSections:   ()              => request('GET',  '/admin/sections'),
-  updateSection: (id, body)      => request('PUT',  `/admin/sections/${id}`, body),
-  createField:   (sectionId, body) => request('POST', `/admin/sections/${sectionId}/fields`, body),
+  getSections:   ()               => request('GET',  '/admin/sections'),
+  updateSection: (id, body)       => request('PUT',  `/admin/sections/${id}`, body),
+  createField:   (sectionId, body)=> request('POST', `/admin/sections/${sectionId}/fields`, body),
 
   // Dev Mode — fields
   getFields:   ()           => request('GET',    '/admin/fields'),
   updateField: (id, body)   => request('PUT',    `/admin/fields/${id}`, body),
   deleteField: (id)         => request('DELETE', `/admin/fields/${id}`),
 
-  // Dev Mode — seed row management
-  addSeedRow:    (tableId, body) => request('POST',   `/admin/tables/${tableId}/seedrows`, body),
-  updateSeedRow: (rowId, body)   => request('PUT',    `/admin/seedrows/${rowId}`, body),
-  deleteSeedRow: (rowId)         => request('DELETE', `/admin/seedrows/${rowId}`),
-
   // Generation log
   getGenerationLogs: ()     => request('GET',    '/admin/generation-logs'),
+
+  // Standards CRUD
+  getStandards:    (hint)   => request('GET',    `/admin/standards${hint ? `?hint=${encodeURIComponent(hint)}` : ''}`),
+  createStandard:  (body)   => request('POST',   '/admin/standards', body),
+  updateStandard:  (id, b)  => request('PUT',    `/admin/standards/${id}`, b),
+  deleteStandard:  (id)     => request('DELETE', `/admin/standards/${id}`),
 };
