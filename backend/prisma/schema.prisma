@@ -11,7 +11,15 @@ datasource db {
 
 enum Role {
   ADMIN
+  SENIOR    // Senior engineer — can approve project submissions
   ENGINEER
+}
+
+enum ApprovalStatus {
+  DRAFT       // Not yet submitted
+  SUBMITTED   // Awaiting approver response
+  APPROVED    // Approver signed off
+  REJECTED    // Approver requested changes
 }
 
 enum VisibilityRule {
@@ -50,13 +58,15 @@ enum ChangeType {
 // ─── USERS ───────────────────────────────────────────────────────────────────
 
 model User {
-  id           Int       @id @default(autoincrement())
-  employeeId   String    @unique
-  name         String
-  passwordHash String
-  role         Role      @default(ENGINEER)
-  createdAt    DateTime  @default(now())
-  projects     Project[]
+  id                 Int               @id @default(autoincrement())
+  employeeId         String            @unique
+  name               String
+  passwordHash       String
+  role               Role              @default(ENGINEER)
+  createdAt          DateTime          @default(now())
+  projects           Project[]
+  submittedApprovals ProjectApproval[] @relation("ApprovalSubmitter")
+  reviewApprovals    ProjectApproval[] @relation("ApprovalReviewer")
 }
 
 // ─── PROJECT TYPES ───────────────────────────────────────────────────────────
@@ -136,9 +146,9 @@ model Project {
   jobNumber            String?
   facilityName         String?
   location             String?
-  // Wizard classification JSON: { facilityType, hasStorage, hasPipeline,
-  // hasLNG, isGreenfield, hasDWST, hasJetty, hasTankSystem }
   classification       Json?
+  // Approval workflow
+  approvalStatus       ApprovalStatus           @default(DRAFT)
   activeRevisionCode   String?
   createdById          Int
   createdBy            User                     @relation(fields: [createdById], references: [id])
@@ -153,6 +163,7 @@ model Project {
   clauseMarks          ClauseRevisionMark[]
   generationLogs       GenerationLog[]
   sectionReviews       ProjectSectionReview[]
+  approval             ProjectApproval?
 }
 
 model ProjectFieldValue {
@@ -189,6 +200,24 @@ model ProjectSectionReview {
   reviewedBy String?
 
   @@unique([projectId, sectionId])
+}
+
+// ─── APPROVAL WORKFLOW ───────────────────────────────────────────────────────
+// One active approval record per project.
+// Engineer submits → selects a SENIOR/ADMIN approver → approver sees it on dashboard.
+
+model ProjectApproval {
+  id            Int            @id @default(autoincrement())
+  projectId     Int            @unique   // one approval record per project
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  submittedById Int
+  submittedBy   User           @relation("ApprovalSubmitter", fields: [submittedById], references: [id])
+  approverId    Int
+  approver      User           @relation("ApprovalReviewer", fields: [approverId], references: [id])
+  status        ApprovalStatus @default(SUBMITTED)
+  comments      String?        // approver's rejection/review comments
+  submittedAt   DateTime       @default(now())
+  respondedAt   DateTime?
 }
 
 // ─── SECTION TABLES ──────────────────────────────────────────────────────────
@@ -317,14 +346,12 @@ model GenerationLog {
 }
 
 // ─── STANDARDS REFERENCE ─────────────────────────────────────────────────────
-// Loose coupling via sectionNumberHint string — no FK to Section.
-// Sections can be renumbered freely without breaking standards entries.
 
 model SectionStandard {
   id                Int      @id @default(autoincrement())
-  sectionNumberHint String   // e.g. "4.2.2" — matches Section.numberHint
-  standardCode      String   // e.g. "OISD-116", "NFPA 11", "PNGRB"
-  clause            String?  // e.g. "Clause 8.2.3"
+  sectionNumberHint String
+  standardCode      String
+  clause            String?
   title             String
   body              String   @db.Text
   sortOrder         Int      @default(0)

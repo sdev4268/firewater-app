@@ -11,6 +11,7 @@ const generateRoutes  = require('./routes/generate');
 const revisionRoutes  = require('./routes/revisions');
 const adminRoutes     = require('./routes/admin');
 const standardsRoutes = require('./routes/standards');
+const approvalsRouter = require('./routes/approvals');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -32,32 +33,30 @@ app.use('/api/generate',  generateRoutes);
 app.use('/api/admin',     adminRoutes);
 app.use('/api/standards', standardsRoutes);
 
+// Approval routes — mounted at both:
+//   /api/approvals/pending, /api/approvals/reviewers  (standalone)
+//   /api/projects/:id/approvals/...                   (project sub-routes)
+app.use('/api/approvals', approvalsRouter);
+app.use('/api',           approvalsRouter);  // catches /api/projects/:id/approvals/*
+
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 // ─── SPA STATIC SERVING ───────────────────────────────────────────────────────
-// Set SERVE_STATIC=true when the backend also serves the built frontend
-// (e.g. on Render as a single service).
-// Vite build output must be in ./public (adjust path as needed).
 if (process.env.SERVE_STATIC === 'true') {
   const staticDir = path.join(__dirname, 'public');
   app.use(express.static(staticDir));
-  // SPA catch-all — must come AFTER all API routes
   app.get('*', (req, res) => {
     res.sendFile(path.join(staticDir, 'index.html'));
   });
 }
 
-// ─── 404 HANDLER (API-only mode) ─────────────────────────────────────────────
 if (process.env.SERVE_STATIC !== 'true') {
-  app.use((req, res) => {
-    res.status(404).json({ error: 'Route not found' });
-  });
+  app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 }
 
-// ─── ERROR HANDLER ────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ error: 'Internal server error' });

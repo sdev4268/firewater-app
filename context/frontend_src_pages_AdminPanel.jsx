@@ -7,8 +7,7 @@
  * Tab 3: Generation Log
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect, useCallback } from 'react';import { useNavigate } from 'react-router-dom';
 import { admin as adminApi } from '../api/client';
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -288,6 +287,226 @@ function GenerationLogTab() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// TAB 4: STANDARDS REFERENCE MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════════════
+
+const EMPTY_STD = { sectionNumberHint: '', standardCode: '', clause: '', title: '', body: '', sortOrder: 0 };
+
+function StandardsTab() {
+  const [standards,   setStandards]   = useState([]);
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState('');
+  const [filterHint,  setFilterHint]  = useState('');
+  const [drawerOpen,  setDrawerOpen]  = useState(false);
+  const [drawerMode,  setDrawerMode]  = useState('create');
+  const [editTarget,  setEditTarget]  = useState(null);
+  const [form,        setForm]        = useState(EMPTY_STD);
+  const [formBusy,    setFormBusy]    = useState(false);
+  const [formErr,     setFormErr]     = useState('');
+  const [formOk,      setFormOk]      = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const { standards: list } = await adminApi.getStandards();
+      setStandards(list || []);
+    } catch(e) { setError(e.message || 'Failed to load standards'); }
+    finally { setLoading(false); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const filtered = standards.filter(s =>
+    !filterHint.trim() ||
+    s.sectionNumberHint.toLowerCase().includes(filterHint.toLowerCase()) ||
+    s.standardCode.toLowerCase().includes(filterHint.toLowerCase())
+  );
+
+  function openCreate() {
+    setDrawerMode('create'); setEditTarget(null); setForm(EMPTY_STD); setFormErr(''); setFormOk(''); setDrawerOpen(true);
+  }
+  function openEdit(s) {
+    setDrawerMode('edit'); setEditTarget(s);
+    setForm({ sectionNumberHint: s.sectionNumberHint, standardCode: s.standardCode, clause: s.clause || '', title: s.title, body: s.body, sortOrder: s.sortOrder ?? 0 });
+    setFormErr(''); setFormOk(''); setDrawerOpen(true);
+  }
+
+  async function handleSubmit() {
+    setFormErr(''); setFormOk('');
+    if (!form.sectionNumberHint.trim() || !form.standardCode.trim() || !form.title.trim() || !form.body.trim())
+      return setFormErr('Section hint, standard code, title and body are required');
+    setFormBusy(true);
+    try {
+      const payload = {
+        sectionNumberHint: form.sectionNumberHint.trim(),
+        standardCode:      form.standardCode.trim(),
+        clause:            form.clause.trim() || null,
+        title:             form.title.trim(),
+        body:              form.body.trim(),
+        sortOrder:         parseInt(form.sortOrder) || 0,
+      };
+      if (drawerMode === 'create') {
+        await adminApi.createStandard(payload);
+        setFormOk('Created'); setTimeout(() => { setDrawerOpen(false); load(); }, 800);
+      } else {
+        await adminApi.updateStandard(editTarget.id, payload);
+        setFormOk('Updated'); setTimeout(() => { setDrawerOpen(false); load(); }, 800);
+      }
+    } catch(e) { setFormErr(e.message || 'Save failed'); }
+    finally { setFormBusy(false); }
+  }
+
+  async function handleDelete(s) {
+    if (!window.confirm(`Delete "${s.title}"?\n\nThis will remove it from the standards reference panel.`)) return;
+    try { await adminApi.deleteStandard(s.id); load(); }
+    catch(e) { alert(e.message); }
+  }
+
+  // Group by sectionNumberHint for display
+  const uniqueHints = [...new Set(standards.map(s => s.sectionNumberHint))].sort();
+
+  return (
+    <>
+      <div style={S.card}>
+        <div style={S.cardHead}>
+          <span style={S.cardTitle}>Standards Reference ({standards.length} entries)</span>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <input
+              style={{ fontSize: '13px', padding: '6px 10px', borderRadius: '5px', border: '1px solid #ddd', outline: 'none', fontFamily: 'inherit', width: '200px' }}
+              placeholder="Filter by section or code…"
+              value={filterHint}
+              onChange={e => setFilterHint(e.target.value)}
+            />
+            <button style={S.btnPrimary} onClick={openCreate}>+ Add Standard</button>
+          </div>
+        </div>
+
+        {/* Section hint chips */}
+        {uniqueHints.length > 0 && (
+          <div style={{ padding: '8px 16px', borderBottom: '1px solid #f0f0f0', display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+            {filterHint && <button style={{ fontSize: '11px', padding: '2px 9px', borderRadius: '99px', border: 'none', background: '#e65100', color: '#fff', cursor: 'pointer', fontWeight: 700 }} onClick={() => setFilterHint('')}>Clear ×</button>}
+            {uniqueHints.map(h => (
+              <button key={h} style={{ fontSize: '11px', padding: '2px 9px', borderRadius: '99px', border: 'none', background: filterHint === h ? '#1565c0' : '#e3f2fd', color: filterHint === h ? '#fff' : '#1565c0', cursor: 'pointer', fontWeight: 600 }} onClick={() => setFilterHint(filterHint === h ? '' : h)}>
+                §{h}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {loading && <div style={S.emptyState}>Loading…</div>}
+        {error   && <div style={{ ...S.emptyState, color: '#c62828' }}>⚠ {error}</div>}
+        {!loading && !error && filtered.length === 0 && (
+          <div style={S.emptyState}>No standards found. {filterHint && 'Try clearing the filter or '} Add entries with the button above.</div>
+        )}
+        {!loading && !error && filtered.length > 0 && (
+          <table style={S.table}>
+            <thead>
+              <tr>
+                <th style={S.th}>Section</th>
+                <th style={S.th}>Standard</th>
+                <th style={S.th}>Clause</th>
+                <th style={S.th}>Title</th>
+                <th style={S.th}>Last Modified</th>
+                <th style={S.th}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(s => (
+                <tr key={s.id}>
+                  <td style={S.td}>
+                    <span style={{ ...S.badge('#1565c0'), fontFamily: 'monospace' }}>§{s.sectionNumberHint}</span>
+                  </td>
+                  <td style={S.td}>
+                    <span style={{ ...S.badge('#3949ab') }}>{s.standardCode}</span>
+                  </td>
+                  <td style={{ ...S.td, color: '#888', fontSize: '12px' }}>{s.clause || '—'}</td>
+                  <td style={S.td}>
+                    <div style={{ fontSize: '13px', fontWeight: 500, color: '#1a1a2e', marginBottom: '2px' }}>{s.title}</div>
+                    <div style={{ fontSize: '11px', color: '#aaa', lineHeight: 1.4, maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {s.body?.substring(0, 100)}{s.body?.length > 100 ? '…' : ''}
+                    </div>
+                  </td>
+                  <td style={{ ...S.td, fontSize: '12px', color: '#888', whiteSpace: 'nowrap' }}>
+                    {fmtDate(s.updatedAt)}
+                    {s.createdAt !== s.updatedAt && (
+                      <div style={{ fontSize: '10px', color: '#bbb' }}>Created {fmtShortDate(s.createdAt)}</div>
+                    )}
+                  </td>
+                  <td style={S.td}>
+                    <div style={S.btnRow}>
+                      <button style={S.btnEdit} onClick={() => openEdit(s)}>Edit</button>
+                      <button style={S.btnDanger} onClick={() => handleDelete(s)}>Delete</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Create / Edit Drawer */}
+      {drawerOpen && (
+        <div style={S.overlay} onClick={e => e.target === e.currentTarget && setDrawerOpen(false)}>
+          <div style={S.drawer}>
+            <div style={S.drawerHdr}>
+              <h3 style={S.drawerTitle}>{drawerMode === 'create' ? 'Add Standard' : 'Edit Standard'}</h3>
+              <button style={{ background: 'none', border: 'none', color: '#aaa', cursor: 'pointer', fontSize: '22px' }} onClick={() => setDrawerOpen(false)}>×</button>
+            </div>
+            <div style={S.drawerBody}>
+              {formErr && <div style={{ ...S.errMsg, marginBottom: '12px', padding: '8px 12px', background: '#ffebee', borderRadius: '5px' }}>⚠ {formErr}</div>}
+              {formOk  && <div style={{ ...S.successMsg, marginBottom: '12px', padding: '8px 12px', background: '#e8f5e9', borderRadius: '5px' }}>✓ {formOk}</div>}
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                <div style={S.formGroup}>
+                  <label style={S.label}>Section Number Hint *</label>
+                  <input style={S.input} placeholder="e.g. 4.3" value={form.sectionNumberHint} onChange={e => setForm(f => ({...f, sectionNumberHint: e.target.value}))} />
+                </div>
+                <div style={S.formGroup}>
+                  <label style={S.label}>Standard Code *</label>
+                  <input style={S.input} placeholder="e.g. OISD-STD-116" value={form.standardCode} onChange={e => setForm(f => ({...f, standardCode: e.target.value}))} />
+                </div>
+              </div>
+
+              <div style={S.formGroup}>
+                <label style={S.label}>Clause / Reference</label>
+                <input style={S.input} placeholder="e.g. Clause 7.2.3 (optional)" value={form.clause} onChange={e => setForm(f => ({...f, clause: e.target.value}))} />
+              </div>
+
+              <div style={S.formGroup}>
+                <label style={S.label}>Title *</label>
+                <input style={S.input} placeholder="e.g. Hydrant Spacing Requirements" value={form.title} onChange={e => setForm(f => ({...f, title: e.target.value}))} />
+              </div>
+
+              <div style={S.formGroup}>
+                <label style={S.label}>Body / Excerpt *</label>
+                <textarea
+                  style={{ ...S.input, minHeight: '140px', resize: 'vertical', lineHeight: 1.6 }}
+                  placeholder="Paste the relevant clause text or summary here…"
+                  value={form.body}
+                  onChange={e => setForm(f => ({...f, body: e.target.value}))}
+                />
+              </div>
+
+              <div style={S.formGroup}>
+                <label style={S.label}>Sort Order</label>
+                <input style={{ ...S.input, width: '120px' }} type="number" min="0" value={form.sortOrder} onChange={e => setForm(f => ({...f, sortOrder: e.target.value}))} />
+                <div style={{ fontSize: '11px', color: '#aaa', marginTop: '4px' }}>Lower = shown first within the same section.</div>
+              </div>
+            </div>
+            <div style={S.drawerFoot}>
+              <button style={S.btnCancel} onClick={() => setDrawerOpen(false)}>Cancel</button>
+              <button style={{ ...S.btnPrimary, opacity: formBusy ? 0.65 : 1 }} onClick={handleSubmit} disabled={formBusy}>
+                {formBusy ? 'Saving…' : drawerMode === 'create' ? 'Create' : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // MAIN ADMIN PANEL
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -300,9 +519,10 @@ export default function AdminPanel() {
   useEffect(() => { adminApi.getStats().then(setStats).catch(() => {}); }, []);
 
   const TABS = [
-    { id: 'users',   label: '👤 User Management' },
-    { id: 'devmode', label: '🔧 Dev Mode'         },
-    { id: 'genlog',  label: '📄 Generation Log'   },
+    { id: 'users',     label: '👤 User Management' },
+    { id: 'devmode',   label: '🔧 Dev Mode'         },
+    { id: 'genlog',    label: '📄 Generation Log'   },
+    { id: 'standards', label: '📚 Standards'         },
   ];
 
   return (
@@ -325,9 +545,10 @@ export default function AdminPanel() {
             </button>
           ))}
         </div>
-        {tab === 'users'   && <UsersTab currentUserId={currentUser?.id} />}
-        {tab === 'devmode' && <DevModeTab onLaunch={() => navigate('/admin/devmode')} />}
-        {tab === 'genlog'  && <GenerationLogTab />}
+        {tab === 'users'     && <UsersTab currentUserId={currentUser?.id} />}
+        {tab === 'devmode'   && <DevModeTab onLaunch={() => navigate('/admin/devmode')} />}
+        {tab === 'genlog'    && <GenerationLogTab />}
+        {tab === 'standards' && <StandardsTab />}
       </div>
     </div>
   );

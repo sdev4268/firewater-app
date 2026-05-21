@@ -14,7 +14,6 @@ async function request(method, path, body = null) {
 
   const res = await fetch(`${BASE_URL}${path}`, options);
 
-  // Auto-logout on 401
   if (res.status === 401) {
     localStorage.removeItem('fw_token');
     localStorage.removeItem('fw_user');
@@ -68,24 +67,37 @@ export const generate = {
 
 // ─── REVISIONS ────────────────────────────────────────────────────────────────
 export const revisions = {
-  list:         (id)              => request('GET',    `/projects/${id}/revisions`),
-  create:       (id, body)        => request('POST',   `/projects/${id}/revisions`, body),
-  update:       (id, code, body)  => request('PUT',    `/projects/${id}/revisions/${encodeURIComponent(code)}`, body),
-  remove:       (id, code)        => request('DELETE', `/projects/${id}/revisions/${encodeURIComponent(code)}`),
-  setActive:    (id, revisionCode)=> request('PATCH',  `/projects/${id}/active-revision`, { revisionCode }),
-  stopTracking: (id)              => request('PATCH',  `/projects/${id}/active-revision`, { revisionCode: null }),
-  getMarks:     (id)              => request('GET',    `/projects/${id}/clausemarks`),
-  addMark:      (id, body)        => request('POST',   `/projects/${id}/clausemarks`, body),
-  clearMarks:   (id, code)        => request('DELETE', `/projects/${id}/clausemarks`, { revisionCode: code }),
+  list:         (id)               => request('GET',    `/projects/${id}/revisions`),
+  create:       (id, body)         => request('POST',   `/projects/${id}/revisions`, body),
+  update:       (id, code, body)   => request('PUT',    `/projects/${id}/revisions/${encodeURIComponent(code)}`, body),
+  remove:       (id, code)         => request('DELETE', `/projects/${id}/revisions/${encodeURIComponent(code)}`),
+  setActive:    (id, revisionCode) => request('PATCH',  `/projects/${id}/active-revision`, { revisionCode }),
+  stopTracking: (id)               => request('PATCH',  `/projects/${id}/active-revision`, { revisionCode: null }),
+  getMarks:     (id)               => request('GET',    `/projects/${id}/clausemarks`),
+  addMark:      (id, body)         => request('POST',   `/projects/${id}/clausemarks`, body),
+  clearMarks:   (id, code)         => request('DELETE', `/projects/${id}/clausemarks`, { revisionCode: code }),
 };
 
 // ─── SECTION REVIEWS ──────────────────────────────────────────────────────────
-// "Acknowledge & Commit" workflow — engineers mark sections as reviewed.
 export const reviews = {
-  getAll:    (projectId)            => request('GET',    `/projects/${projectId}/reviews`),
-  mark:      (projectId, sectionId) => request('POST',   `/projects/${projectId}/reviews/${sectionId}`),
-  unmark:    (projectId, sectionId) => request('DELETE', `/projects/${projectId}/reviews/${sectionId}`),
-  clearAll:  (projectId)            => request('DELETE', `/projects/${projectId}/reviews`),
+  getAll:   (projectId)            => request('GET',    `/projects/${projectId}/reviews`),
+  mark:     (projectId, sectionId) => request('POST',   `/projects/${projectId}/reviews/${sectionId}`),
+  unmark:   (projectId, sectionId) => request('DELETE', `/projects/${projectId}/reviews/${sectionId}`),
+  clearAll: (projectId)            => request('DELETE', `/projects/${projectId}/reviews`),
+};
+
+// ─── APPROVAL WORKFLOW ────────────────────────────────────────────────────────
+export const approvals = {
+  // Approver's view
+  getPending:   ()                   => request('GET',    '/approvals/pending'),
+  getReviewers: ()                   => request('GET',    '/approvals/reviewers'),
+
+  // Per project
+  getStatus:  (projectId)            => request('GET',    `/projects/${projectId}/approvals`),
+  submit:     (projectId, approverId)=> request('POST',   `/projects/${projectId}/approvals`, { approverId }),
+  retract:    (projectId)            => request('DELETE', `/projects/${projectId}/approvals`),
+  approve:    (projectId)            => request('POST',   `/projects/${projectId}/approvals/approve`),
+  reject:     (projectId, comments)  => request('POST',   `/projects/${projectId}/approvals/reject`, { comments }),
 };
 
 // ─── STANDARDS REFERENCE ──────────────────────────────────────────────────────
@@ -95,31 +107,20 @@ export const standards = {
 
 // ─── ADMIN ────────────────────────────────────────────────────────────────────
 export const admin = {
-  // User management
   getUsers:    ()           => request('GET',    '/admin/users'),
   createUser:  (body)       => request('POST',   '/admin/users', body),
   updateUser:  (id, body)   => request('PUT',    `/admin/users/${id}`, body),
   deleteUser:  (id)         => request('DELETE', `/admin/users/${id}`),
-
-  // Stats
   getStats:    ()           => request('GET',    '/admin/stats'),
-
-  // Dev Mode — sections
-  getSections:   ()               => request('GET',  '/admin/sections'),
-  updateSection: (id, body)       => request('PUT',  `/admin/sections/${id}`, body),
-  createField:   (sectionId, body)=> request('POST', `/admin/sections/${sectionId}/fields`, body),
-
-  // Dev Mode — fields
-  getFields:   ()           => request('GET',    '/admin/fields'),
-  updateField: (id, body)   => request('PUT',    `/admin/fields/${id}`, body),
-  deleteField: (id)         => request('DELETE', `/admin/fields/${id}`),
-
-  // Generation log
-  getGenerationLogs: ()     => request('GET',    '/admin/generation-logs'),
-
-  // Standards CRUD
-  getStandards:    (hint)   => request('GET',    `/admin/standards${hint ? `?hint=${encodeURIComponent(hint)}` : ''}`),
-  createStandard:  (body)   => request('POST',   '/admin/standards', body),
-  updateStandard:  (id, b)  => request('PUT',    `/admin/standards/${id}`, b),
-  deleteStandard:  (id)     => request('DELETE', `/admin/standards/${id}`),
+  getSections:   ()                => request('GET',  '/admin/sections'),
+  updateSection: (id, body)        => request('PUT',  `/admin/sections/${id}`, body),
+  createField:   (sectionId, body) => request('POST', `/admin/sections/${sectionId}/fields`, body),
+  getFields:     ()           => request('GET',    '/admin/fields'),
+  updateField:   (id, body)   => request('PUT',    `/admin/fields/${id}`, body),
+  deleteField:   (id)         => request('DELETE', `/admin/fields/${id}`),
+  getGenerationLogs: ()       => request('GET',    '/admin/generation-logs'),
+  getStandards:    (hint)     => request('GET',    `/admin/standards${hint ? `?hint=${encodeURIComponent(hint)}` : ''}`),
+  createStandard:  (body)     => request('POST',   '/admin/standards', body),
+  updateStandard:  (id, b)    => request('PUT',    `/admin/standards/${id}`, b),
+  deleteStandard:  (id)       => request('DELETE', `/admin/standards/${id}`),
 };
