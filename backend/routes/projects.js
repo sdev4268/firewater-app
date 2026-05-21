@@ -9,7 +9,9 @@ const prisma = new PrismaClient();
 router.post('/', requireAuth, async (req, res) => {
   const {
     name, projectTypeCode, documentNumber, facilityName, location,
-    owner, consultant, jobNumber, classification,
+    owner, consultant, jobNumber,
+    checkerId, approverId,   // project-level team designation (optional at creation)
+    classification,          // wizard JSON
   } = req.body;
 
   if (!name || !projectTypeCode) {
@@ -19,6 +21,16 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     const projectType = await prisma.projectType.findUnique({ where: { code: projectTypeCode } });
     if (!projectType) return res.status(400).json({ error: `Unknown projectTypeCode: ${projectTypeCode}` });
+
+    // Validate checker / approver IDs if provided
+    if (checkerId) {
+      const c = await prisma.user.findUnique({ where: { id: parseInt(checkerId) } });
+      if (!c) return res.status(400).json({ error: 'Checker user not found' });
+    }
+    if (approverId) {
+      const a = await prisma.user.findUnique({ where: { id: parseInt(approverId) } });
+      if (!a) return res.status(400).json({ error: 'Approver user not found' });
+    }
 
     const project = await prisma.project.create({
       data: {
@@ -30,12 +42,16 @@ router.post('/', requireAuth, async (req, res) => {
         owner:          owner          ?? null,
         consultant:     consultant     ?? null,
         jobNumber:      jobNumber      ?? null,
+        checkerId:      checkerId  ? parseInt(checkerId)  : null,
+        approverId:     approverId ? parseInt(approverId) : null,
         classification: classification ?? undefined,
         createdById:    req.user.id,
       },
       include: {
         projectType: true,
         createdBy: { select: { id: true, name: true, employeeId: true } },
+        checker:   { select: { id: true, name: true, employeeId: true } },
+        approver:  { select: { id: true, name: true, employeeId: true } },
       },
     });
 
@@ -49,13 +65,22 @@ router.post('/', requireAuth, async (req, res) => {
 // ─── GET /api/projects — list projects ───────────────────────────────────────
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const where = req.user.role === 'ADMIN' ? {} : { createdById: req.user.id };
+    // Engineers see: projects they created + projects where they are checker or approver
+    const where = req.user.role === 'ADMIN' ? {} : {
+      OR: [
+        { createdById: req.user.id },
+        { checkerId:   req.user.id },
+        { approverId:  req.user.id },
+      ],
+    };
 
     const projectList = await prisma.project.findMany({
       where,
       include: {
         projectType: true,
         createdBy: { select: { id: true, name: true, employeeId: true } },
+        checker:   { select: { id: true, name: true, employeeId: true } },
+        approver:  { select: { id: true, name: true, employeeId: true } },
       },
       orderBy: { updatedAt: 'desc' },
     });
@@ -83,6 +108,7 @@ router.get('/:id', requireAuth, async (req, res) => {
 
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
+    // Engineers can only access their own projects
     if (req.user.role !== 'ADMIN' && project.createdById !== req.user.id) {
       return res.status(403).json({ error: 'Access denied' });
     }
@@ -94,7 +120,7 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 });
 
-// ─── PUT /api/projects/:id — update project metadata ─────────────────────────
+// ─── PUT /api/projects/:id — update project metadata ───────────────────────
 router.put('/:id', requireAuth, async (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid project id' });
@@ -133,7 +159,7 @@ router.put('/:id', requireAuth, async (req, res) => {
   }
 });
 
-// ─── DELETE /api/projects/:id ─────────────────────────────────────────────────
+// ─── DELETE /api/projects/:id — hard delete (cascades via Prisma schema) ─────
 router.delete('/:id', requireAuth, async (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid project id' });
@@ -154,22 +180,9 @@ router.delete('/:id', requireAuth, async (req, res) => {
   }
 });
 
-// ─── GET /api/projects/:id/tree ───────────────────────────────────────────────
-//
-// Returns the full section tree for this project.
-//
-// KEY CHANGE from v1: ALL sections (including USER_TOGGLE) are now returned —
-// each carries an `isEnabled` flag. The TOC shows all sections with a toggle.
-// Only PROJECT_TYPE whitelist filtering (hard filter by project type) is applied.
-//
-// isEnabled resolution per section:
-//   1. If a ProjectSectionToggle record exists → use its isEnabled value
-//   2. Otherwise → ALWAYS/PROJECT_TYPE sections default true,
-//                  USER_TOGGLE sections default false
-//
-// `enabledToggleIds` in the response = IDs of all currently-enabled sections.
-// The document generator uses this to decide what to include.
-//
+// ─── GET /api/projects/:id/tree — section tree for this project's type ────────
+// Included here (vs a separate sections route) because the client calls
+// /projects/:id/tree and index.js mounts projectRoutes at /api/projects
 router.get('/:id/tree', requireAuth, async (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid project id' });
@@ -187,11 +200,11 @@ router.get('/:id/tree', requireAuth, async (req, res) => {
 
     const projectTypeCode = project.projectType.code;
 
-    // Load ALL toggle records for this project (both enabled and disabled)
+    // Load enabled USER_TOGGLE section IDs for this project
     const toggleRecords = await prisma.projectSectionToggle.findMany({
-      where: { projectId: id },
+      where: { projectId: id, isEnabled: true },
     });
-    const toggleMap = new Map(toggleRecords.map(t => [t.sectionId, t.isEnabled]));
+    const enabledToggleIds = new Set(toggleRecords.map(t => t.sectionId));
 
     // Fetch all sections with their fields, overrides, tables, content items
     const allSections = await prisma.section.findMany({
@@ -199,12 +212,16 @@ router.get('/:id/tree', requireAuth, async (req, res) => {
       include: {
         fields: {
           include: {
-            overrides: { where: { projectTypeCode } },
+            overrides: {
+              where: { projectTypeCode },
+            },
           },
           orderBy: { id: 'asc' },
         },
         sectionTables: {
-          include: { seedRows: { orderBy: { sortOrder: 'asc' } } },
+          include: {
+            seedRows: { orderBy: { sortOrder: 'asc' } },
+          },
           orderBy: { sortOrder: 'asc' },
         },
         contentItems: {
@@ -213,45 +230,38 @@ router.get('/:id/tree', requireAuth, async (req, res) => {
       },
     });
 
-    // Filter by projectTypesWhitelist only (hard filter — wrong project type)
-    // USER_TOGGLE sections are NO LONGER filtered out; they appear in the tree
-    // with isEnabled = false by default.
-    const whitelistFiltered = allSections.filter(s => {
-      if (!s.projectTypesWhitelist) return true;
-      const list = Array.isArray(s.projectTypesWhitelist)
-        ? s.projectTypesWhitelist
-        : JSON.parse(s.projectTypesWhitelist);
-      return list.includes(projectTypeCode);
-    });
-
-    // Apply field overrides
-    const sectionsWithOverrides = whitelistFiltered.map(s => {
-      // Compute isEnabled for this section
-      let isEnabled;
-      if (toggleMap.has(s.id)) {
-        isEnabled = toggleMap.get(s.id);
-      } else {
-        // Default: USER_TOGGLE sections start disabled; everything else starts enabled
-        isEnabled = s.visibilityRule !== 'USER_TOGGLE';
+    // Filter by projectTypesWhitelist and USER_TOGGLE visibility
+    const visible = allSections.filter(s => {
+      // Whitelist check
+      if (s.projectTypesWhitelist) {
+        const list = Array.isArray(s.projectTypesWhitelist)
+          ? s.projectTypesWhitelist
+          : JSON.parse(s.projectTypesWhitelist);
+        if (!list.includes(projectTypeCode)) return false;
       }
-
-      return {
-        ...s,
-        isEnabled,
-        fields: s.fields.map(f => {
-          const override = f.overrides[0];
-          if (!override) return f;
-          return {
-            ...f,
-            fixedValue:        f.valueType === 'FIXED' ? override.overrideValue : f.fixedValue,
-            defaultValue:      f.valueType !== 'FIXED' ? override.overrideValue : f.defaultValue,
-            _overrideApplied:  true,
-          };
-        }),
-      };
+      // USER_TOGGLE: only show if engineer has explicitly enabled it
+      if (s.visibilityRule === 'USER_TOGGLE') {
+        return enabledToggleIds.has(s.id);
+      }
+      return true;
     });
 
-    // Build nested tree
+    // Apply field overrides: replace fixedValue/defaultValue if override exists
+    const sectionsWithOverrides = visible.map(s => ({
+      ...s,
+      fields: s.fields.map(f => {
+        const override = f.overrides[0]; // at most one per projectTypeCode
+        if (!override) return f;
+        return {
+          ...f,
+          fixedValue:   f.valueType === 'FIXED'    ? override.overrideValue : f.fixedValue,
+          defaultValue: f.valueType !== 'FIXED'    ? override.overrideValue : f.defaultValue,
+          _overrideApplied: true,
+        };
+      }),
+    }));
+
+    // Build tree structure
     const byId = {};
     sectionsWithOverrides.forEach(s => { byId[s.id] = { ...s, children: [] }; });
 
@@ -264,12 +274,7 @@ router.get('/:id/tree', requireAuth, async (req, res) => {
       }
     });
 
-    // enabledToggleIds = all section IDs currently enabled (for doc generator)
-    const enabledToggleIds = sectionsWithOverrides
-      .filter(s => s.isEnabled)
-      .map(s => s.id);
-
-    res.json({ projectTypeCode, sections: roots, enabledToggleIds });
+    res.json({ projectTypeCode, sections: roots, enabledToggleIds: [...enabledToggleIds] });
   } catch (err) {
     console.error('Section tree error:', err);
     res.status(500).json({ error: 'Internal server error' });

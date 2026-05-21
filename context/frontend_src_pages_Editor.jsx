@@ -471,7 +471,7 @@ function SubmitApprovalModal({ projectId, onClose, onSubmitted }) {
   const [err,       setErr]       = useState('');
 
   useEffect(() => {
-    approvalsApi.getReviewers().then(d => { setReviewers(d.reviewers || []); if (d.reviewers?.length) setSelected(String(d.reviewers[0].id)); }).catch(e => setErr(e.message));
+    approvalsApi.getUsers().then(d => { setReviewers(d.users || []); if (d.users?.length) setSelected(String(d.users[0].id)); }).catch(e => setErr(e.message));
   }, []);
 
   async function handleSubmit() {

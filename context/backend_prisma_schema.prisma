@@ -11,15 +11,15 @@ datasource db {
 
 enum Role {
   ADMIN
-  SENIOR    // Senior engineer — can approve project submissions
+  SENIOR    // kept for optional use; not required for approval workflow
   ENGINEER
 }
 
 enum ApprovalStatus {
-  DRAFT       // Not yet submitted
-  SUBMITTED   // Awaiting approver response
-  APPROVED    // Approver signed off
-  REJECTED    // Approver requested changes
+  DRAFT
+  SUBMITTED   // awaiting approver response
+  APPROVED
+  REJECTED
 }
 
 enum VisibilityRule {
@@ -64,7 +64,11 @@ model User {
   passwordHash       String
   role               Role              @default(ENGINEER)
   createdAt          DateTime          @default(now())
-  projects           Project[]
+  projects           Project[]         @relation("ProjectCreator")
+  // Project-level team designation (back-relations)
+  checkingProjects   Project[]         @relation("ProjectChecker")
+  approvingProjects  Project[]         @relation("ProjectApprover")
+  // Approval workflow
   submittedApprovals ProjectApproval[] @relation("ApprovalSubmitter")
   reviewApprovals    ProjectApproval[] @relation("ApprovalReviewer")
 }
@@ -147,11 +151,20 @@ model Project {
   facilityName         String?
   location             String?
   classification       Json?
-  // Approval workflow
+
+  // ── Project team (designated at creation) ──────────────────────────────────
+  // These users can access this project for review/approval
+  // regardless of their system role. Any engineer can be designated.
+  checkerId            Int?
+  checker              User?                    @relation("ProjectChecker",  fields: [checkerId],  references: [id])
+  approverId           Int?
+  approver             User?                    @relation("ProjectApprover", fields: [approverId], references: [id])
+
+  // ── Approval workflow state ────────────────────────────────────────────────
   approvalStatus       ApprovalStatus           @default(DRAFT)
   activeRevisionCode   String?
   createdById          Int
-  createdBy            User                     @relation(fields: [createdById], references: [id])
+  createdBy            User                     @relation("ProjectCreator", fields: [createdById], references: [id])
   createdAt            DateTime                 @default(now())
   updatedAt            DateTime                 @updatedAt
   fieldValues          ProjectFieldValue[]
@@ -188,7 +201,7 @@ model ProjectSectionToggle {
   @@unique([projectId, sectionId])
 }
 
-// ─── SECTION REVIEW TRACKING ─────────────────────────────────────────────────
+// ─── SECTION REVIEWS ─────────────────────────────────────────────────────────
 
 model ProjectSectionReview {
   id         Int      @id @default(autoincrement())
@@ -203,19 +216,19 @@ model ProjectSectionReview {
 }
 
 // ─── APPROVAL WORKFLOW ───────────────────────────────────────────────────────
-// One active approval record per project.
-// Engineer submits → selects a SENIOR/ADMIN approver → approver sees it on dashboard.
+// Engineer submits → designated approver (or checker) reviews.
+// No system-level role required — project.approverId drives who can approve.
 
 model ProjectApproval {
   id            Int            @id @default(autoincrement())
-  projectId     Int            @unique   // one approval record per project
+  projectId     Int            @unique
   project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
   submittedById Int
   submittedBy   User           @relation("ApprovalSubmitter", fields: [submittedById], references: [id])
   approverId    Int
   approver      User           @relation("ApprovalReviewer", fields: [approverId], references: [id])
   status        ApprovalStatus @default(SUBMITTED)
-  comments      String?        // approver's rejection/review comments
+  comments      String?
   submittedAt   DateTime       @default(now())
   respondedAt   DateTime?
 }

@@ -2,17 +2,18 @@
 /**
  * backend/routes/approvals.js
  *
- * Mounted at /api/approvals in index.js
- * Also approval sub-routes are accessed via /api/projects/:id/...
+ * Approval workflow — no system role required.
+ * The engineer designates checker + approver during project creation.
+ * Any user can be an approver for a specific project.
  *
  * Routes:
- *   GET  /api/approvals/pending                     — approver: list pending approvals
- *   GET  /api/approvals/reviewers                   — get list of SENIOR/ADMIN users for submitter
- *   POST /api/projects/:id/approvals                — engineer submits for approval
- *   GET  /api/projects/:id/approvals                — get current approval status
- *   DELETE /api/projects/:id/approvals              — retract submission (back to DRAFT)
- *   POST /api/projects/:id/approvals/approve        — approver approves
- *   POST /api/projects/:id/approvals/reject         — approver rejects (body: { comments })
+ *   GET  /api/approvals/pending               — list projects pending current user's approval
+ *   GET  /api/approvals/users                 — all users (for picker; accessible by any auth user)
+ *   POST /api/projects/:id/approvals          — engineer submits for approval
+ *   GET  /api/projects/:id/approvals          — get approval status
+ *   DELETE /api/projects/:id/approvals        — retract submission
+ *   POST /api/projects/:id/approvals/approve  — approver approves
+ *   POST /api/projects/:id/approvals/reject   — approver rejects
  */
 
 const express = require('express');
@@ -22,30 +23,21 @@ const { requireAuth }  = require('../middleware/requireAuth');
 const router = express.Router();
 const prisma = new PrismaClient();
 
-const PROJECT_INCLUDE = {
-  projectType: true,
-  createdBy: { select: { id: true, name: true, employeeId: true } },
-  approval: {
-    include: {
-      submittedBy: { select: { id: true, name: true, employeeId: true } },
-      approver:    { select: { id: true, name: true, employeeId: true } },
-    },
-  },
-};
-
-// ─── Helper: get project with ownership check ─────────────────────────────────
-async function getProject(id, userId, role) {
+// ─── Helper ───────────────────────────────────────────────────────────────────
+async function getProjectWithAccess(id, userId, role) {
   const project = await prisma.project.findUnique({ where: { id } });
   if (!project) return { error: 'Project not found', status: 404 };
-  if (role !== 'ADMIN' && project.createdById !== userId) {
-    return { error: 'Access denied', status: 403 };
-  }
+  // Allow: creator, designated approver, designated checker, admin
+  const isAllowed = role === 'ADMIN'
+    || project.createdById === userId
+    || project.approverId  === userId
+    || project.checkerId   === userId;
+  if (!isAllowed) return { error: 'Access denied', status: 403 };
   return { project };
 }
 
 // ─── GET /api/approvals/pending ───────────────────────────────────────────────
-// Returns all projects where current user is the designated approver
-// and the approval is still in SUBMITTED status.
+// Returns all SUBMITTED projects where current user is the designated approver.
 router.get('/pending', requireAuth, async (req, res) => {
   try {
     const pending = await prisma.projectApproval.findMany({
@@ -65,77 +57,81 @@ router.get('/pending', requireAuth, async (req, res) => {
     res.json({
       count: pending.length,
       approvals: pending.map(a => ({
-        approvalId:    a.id,
-        projectId:     a.projectId,
-        projectName:   a.project.name,
-        projectType:   a.project.projectType?.code,
-        submittedBy:   a.submittedBy,
-        submittedAt:   a.submittedAt,
-        status:        a.status,
+        approvalId:  a.id,
+        projectId:   a.projectId,
+        projectName: a.project.name,
+        projectType: a.project.projectType?.code,
+        submittedBy: a.submittedBy,
+        submittedAt: a.submittedAt,
+        status:      a.status,
       })),
     });
-  } catch (err) {
-    console.error('GET /approvals/pending error:', err);
+  } catch(err) {
+    console.error('GET /approvals/pending:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// ─── GET /api/approvals/reviewers ─────────────────────────────────────────────
-// Returns all SENIOR and ADMIN users (potential approvers).
-router.get('/reviewers', requireAuth, async (req, res) => {
+// ─── GET /api/approvals/users ─────────────────────────────────────────────────
+// Returns ALL users (for Checker/Approver picker in wizard and editor).
+// Any authenticated user may call this — no admin required.
+router.get('/users', requireAuth, async (req, res) => {
   try {
-    const reviewers = await prisma.user.findMany({
-      where: { role: { in: ['SENIOR', 'ADMIN'] } },
-      select: { id: true, name: true, employeeId: true, role: true },
+    const users = await prisma.user.findMany({
+      // Exclude the caller so they cannot designate themselves
+      where:   { id: { not: req.user.id } },
+      select:  { id: true, name: true, employeeId: true, role: true },
       orderBy: { name: 'asc' },
     });
-    res.json({ reviewers });
-  } catch (err) {
-    console.error('GET /approvals/reviewers error:', err);
+    res.json({ users });
+  } catch(err) {
+    console.error('GET /approvals/users:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // ─── POST /api/projects/:id/approvals ────────────────────────────────────────
-// Engineer submits project for approval. Body: { approverId }
-// Creates/updates a ProjectApproval record and sets project.approvalStatus = SUBMITTED.
+// Engineer submits project for approval.
+// If project.approverId is already set (from wizard), it auto-fills the approver.
+// Body: { approverId? }  — if omitted, falls back to project.approverId
 router.post('/projects/:id/approvals', requireAuth, async (req, res) => {
   const projectId = parseInt(req.params.id);
   if (isNaN(projectId)) return res.status(400).json({ error: 'Invalid project id' });
 
-  const { approverId } = req.body;
-  if (!approverId) return res.status(400).json({ error: 'approverId is required' });
-
   try {
-    const { error, status, project } = await getProject(projectId, req.user.id, req.user.role);
-    if (error) return res.status(status).json({ error });
-
-    // Only DRAFT or REJECTED projects can be submitted
+    const project = await prisma.project.findUnique({ where: { id: projectId } });
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (project.createdById !== req.user.id && req.user.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Only the project creator can submit for approval' });
+    }
     if (project.approvalStatus === 'SUBMITTED') {
-      return res.status(400).json({ error: 'Project is already submitted for approval' });
+      return res.status(400).json({ error: 'Already submitted for approval' });
     }
     if (project.approvalStatus === 'APPROVED') {
-      return res.status(400).json({ error: 'Project is already approved' });
+      return res.status(400).json({ error: 'Already approved' });
     }
 
-    // Verify approver exists and has appropriate role
-    const approver = await prisma.user.findUnique({ where: { id: parseInt(approverId) } });
-    if (!approver) return res.status(404).json({ error: 'Approver not found' });
-    if (approver.role === 'ENGINEER') {
-      return res.status(400).json({ error: 'Approver must be a SENIOR or ADMIN user' });
+    // Resolve approver: body > project.approverId
+    const resolvedApproverId = req.body.approverId
+      ? parseInt(req.body.approverId)
+      : project.approverId;
+
+    if (!resolvedApproverId) {
+      return res.status(400).json({ error: 'No approver set. Please select an approver.' });
+    }
+    if (resolvedApproverId === req.user.id) {
+      return res.status(400).json({ error: 'You cannot approve your own project' });
     }
 
-    // Cannot submit to yourself
-    if (approver.id === req.user.id) {
-      return res.status(400).json({ error: 'Cannot submit a project to yourself for approval' });
-    }
+    const approver = await prisma.user.findUnique({ where: { id: resolvedApproverId } });
+    if (!approver) return res.status(404).json({ error: 'Approver user not found' });
 
-    // Upsert approval record + update project status in a transaction
-    const [approval] = await prisma.$transaction([
+    // Also update project.approverId if it differs (in case user changed it at submit time)
+    await prisma.$transaction([
       prisma.projectApproval.upsert({
         where:  { projectId },
         update: {
-          approverId:    approver.id,
+          approverId:    resolvedApproverId,
           submittedById: req.user.id,
           status:        'SUBMITTED',
           comments:      null,
@@ -144,26 +140,24 @@ router.post('/projects/:id/approvals', requireAuth, async (req, res) => {
         },
         create: {
           projectId,
-          approverId:    approver.id,
+          approverId:    resolvedApproverId,
           submittedById: req.user.id,
-          status:        'SUBMITTED',
         },
       }),
       prisma.project.update({
         where: { id: projectId },
-        data:  { approvalStatus: 'SUBMITTED' },
+        data:  { approvalStatus: 'SUBMITTED', approverId: resolvedApproverId },
       }),
     ]);
 
-    res.json({ approval, message: `Submitted to ${approver.name} for approval` });
-  } catch (err) {
-    console.error('POST /projects/:id/approvals error:', err);
+    res.json({ message: `Submitted to ${approver.name} for approval` });
+  } catch(err) {
+    console.error('POST /projects/:id/approvals:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // ─── GET /api/projects/:id/approvals ─────────────────────────────────────────
-// Get current approval state for a project.
 router.get('/projects/:id/approvals', requireAuth, async (req, res) => {
   const projectId = parseInt(req.params.id);
   if (isNaN(projectId)) return res.status(400).json({ error: 'Invalid project id' });
@@ -172,6 +166,8 @@ router.get('/projects/:id/approvals', requireAuth, async (req, res) => {
     const project = await prisma.project.findUnique({
       where:   { id: projectId },
       include: {
+        checker:  { select: { id: true, name: true, employeeId: true } },
+        approver: { select: { id: true, name: true, employeeId: true } },
         approval: {
           include: {
             submittedBy: { select: { id: true, name: true, employeeId: true } },
@@ -182,32 +178,37 @@ router.get('/projects/:id/approvals', requireAuth, async (req, res) => {
     });
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
-    if (req.user.role !== 'ADMIN' && project.createdById !== req.user.id) {
-      // Also allow the designated approver to see it
-      const isApprover = project.approval?.approverId === req.user.id;
-      if (!isApprover) return res.status(403).json({ error: 'Access denied' });
-    }
+    // Allow creator, checker, approver, admin
+    const isAllowed = req.user.role === 'ADMIN'
+      || project.createdById === req.user.id
+      || project.approverId  === req.user.id
+      || project.checkerId   === req.user.id;
+    if (!isAllowed) return res.status(403).json({ error: 'Access denied' });
 
     res.json({
       approvalStatus: project.approvalStatus,
+      checker:        project.checker  ?? null,
+      approver:       project.approver ?? null,
       approval:       project.approval ?? null,
     });
-  } catch (err) {
-    console.error('GET /projects/:id/approvals error:', err);
+  } catch(err) {
+    console.error('GET /projects/:id/approvals:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // ─── DELETE /api/projects/:id/approvals ──────────────────────────────────────
-// Engineer retracts a submission (goes back to DRAFT).
+// Retract submission — back to DRAFT.
 router.delete('/projects/:id/approvals', requireAuth, async (req, res) => {
   const projectId = parseInt(req.params.id);
   if (isNaN(projectId)) return res.status(400).json({ error: 'Invalid project id' });
 
   try {
-    const { error, status, project } = await getProject(projectId, req.user.id, req.user.role);
-    if (error) return res.status(status).json({ error });
-
+    const project = await prisma.project.findUnique({ where: { id: projectId } });
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (project.createdById !== req.user.id && req.user.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Only the project creator can retract a submission' });
+    }
     if (project.approvalStatus !== 'SUBMITTED') {
       return res.status(400).json({ error: 'Only SUBMITTED projects can be retracted' });
     }
@@ -217,15 +218,15 @@ router.delete('/projects/:id/approvals', requireAuth, async (req, res) => {
       prisma.project.update({ where: { id: projectId }, data: { approvalStatus: 'DRAFT' } }),
     ]);
 
-    res.json({ message: 'Submission retracted. Project is back to DRAFT.' });
-  } catch (err) {
-    console.error('DELETE /projects/:id/approvals error:', err);
+    res.json({ message: 'Submission retracted. Project is back to Draft.' });
+  } catch(err) {
+    console.error('DELETE /projects/:id/approvals:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // ─── POST /api/projects/:id/approvals/approve ─────────────────────────────────
-// Approver approves the project.
+// The designated approver (or admin) approves the project.
 router.post('/projects/:id/approvals/approve', requireAuth, async (req, res) => {
   const projectId = parseInt(req.params.id);
   if (isNaN(projectId)) return res.status(400).json({ error: 'Invalid project id' });
@@ -235,14 +236,16 @@ router.post('/projects/:id/approvals/approve', requireAuth, async (req, res) => 
       where:   { id: projectId },
       include: { approval: true },
     });
-    if (!project) return res.status(404).json({ error: 'Project not found' });
-    if (!project.approval) return res.status(400).json({ error: 'No pending approval for this project' });
+    if (!project)         return res.status(404).json({ error: 'Project not found' });
+    if (!project.approval) return res.status(400).json({ error: 'No pending approval' });
     if (project.approvalStatus !== 'SUBMITTED') {
       return res.status(400).json({ error: 'Project is not in SUBMITTED state' });
     }
 
-    // Only the designated approver (or ADMIN) can approve
-    if (req.user.role !== 'ADMIN' && project.approval.approverId !== req.user.id) {
+    // Only the designated approver (or admin) can approve
+    const isDesignatedApprover = project.approval.approverId === req.user.id
+      || project.approverId === req.user.id;
+    if (!isDesignatedApprover && req.user.role !== 'ADMIN') {
       return res.status(403).json({ error: 'You are not the designated approver for this project' });
     }
 
@@ -257,40 +260,40 @@ router.post('/projects/:id/approvals/approve', requireAuth, async (req, res) => 
       }),
     ]);
 
-    res.json({ message: 'Project approved successfully', approvalStatus: 'APPROVED' });
-  } catch (err) {
-    console.error('POST /approvals/approve error:', err);
+    res.json({ message: 'Project approved', approvalStatus: 'APPROVED' });
+  } catch(err) {
+    console.error('POST /approvals/approve:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // ─── POST /api/projects/:id/approvals/reject ──────────────────────────────────
-// Approver rejects / requests changes. Body: { comments }
+// Approver requests changes. Body: { comments? }
 router.post('/projects/:id/approvals/reject', requireAuth, async (req, res) => {
   const projectId = parseInt(req.params.id);
   if (isNaN(projectId)) return res.status(400).json({ error: 'Invalid project id' });
-
-  const { comments } = req.body;
 
   try {
     const project = await prisma.project.findUnique({
       where:   { id: projectId },
       include: { approval: true },
     });
-    if (!project) return res.status(404).json({ error: 'Project not found' });
-    if (!project.approval) return res.status(400).json({ error: 'No pending approval for this project' });
+    if (!project)         return res.status(404).json({ error: 'Project not found' });
+    if (!project.approval) return res.status(400).json({ error: 'No pending approval' });
     if (project.approvalStatus !== 'SUBMITTED') {
       return res.status(400).json({ error: 'Project is not in SUBMITTED state' });
     }
 
-    if (req.user.role !== 'ADMIN' && project.approval.approverId !== req.user.id) {
+    const isDesignatedApprover = project.approval.approverId === req.user.id
+      || project.approverId === req.user.id;
+    if (!isDesignatedApprover && req.user.role !== 'ADMIN') {
       return res.status(403).json({ error: 'You are not the designated approver for this project' });
     }
 
     await prisma.$transaction([
       prisma.projectApproval.update({
         where: { projectId },
-        data:  { status: 'REJECTED', respondedAt: new Date(), comments: comments ?? null },
+        data:  { status: 'REJECTED', respondedAt: new Date(), comments: req.body.comments ?? null },
       }),
       prisma.project.update({
         where: { id: projectId },
@@ -298,9 +301,9 @@ router.post('/projects/:id/approvals/reject', requireAuth, async (req, res) => {
       }),
     ]);
 
-    res.json({ message: 'Changes requested. Project returned to engineer.', approvalStatus: 'REJECTED' });
-  } catch (err) {
-    console.error('POST /approvals/reject error:', err);
+    res.json({ message: 'Changes requested', approvalStatus: 'REJECTED' });
+  } catch(err) {
+    console.error('POST /approvals/reject:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

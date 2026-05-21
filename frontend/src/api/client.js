@@ -1,38 +1,30 @@
 const BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
-function getToken() {
-  return localStorage.getItem('fw_token');
-}
+function getToken() { return localStorage.getItem('fw_token'); }
 
 async function request(method, path, body = null) {
   const headers = { 'Content-Type': 'application/json' };
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
-
   const options = { method, headers };
   if (body !== null) options.body = JSON.stringify(body);
-
   const res = await fetch(`${BASE_URL}${path}`, options);
-
   if (res.status === 401) {
     localStorage.removeItem('fw_token');
     localStorage.removeItem('fw_user');
     window.location.href = '/login';
     return;
   }
-
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
 
-// ─── AUTH ─────────────────────────────────────────────────────────────────────
 export const auth = {
   login:  (employeeId, password) => request('POST', '/auth/login', { employeeId, password }),
   logout: ()                      => request('POST', '/auth/logout'),
 };
 
-// ─── PROJECTS ─────────────────────────────────────────────────────────────────
 export const projects = {
   list:   ()       => request('GET',    '/projects'),
   get:    (id)     => request('GET',    `/projects/${id}`),
@@ -41,7 +33,6 @@ export const projects = {
   delete: (id)     => request('DELETE', `/projects/${id}`),
 };
 
-// ─── SECTIONS ─────────────────────────────────────────────────────────────────
 export const sections = {
   tree:                  (id)              => request('GET',    `/projects/${id}/tree`),
   saveToggles:           (id, body)        => request('PUT',    `/projects/${id}/toggles`, body),
@@ -54,18 +45,15 @@ export const sections = {
   saveContentSelections: (id, body)        => request('PUT',    `/projects/${id}/contentselections`, body),
 };
 
-// ─── FIELDS ───────────────────────────────────────────────────────────────────
 export const fields = {
   getValues:  (id)       => request('GET', `/projects/${id}/values`),
   saveValues: (id, body) => request('PUT', `/projects/${id}/values`, body),
 };
 
-// ─── GENERATE ─────────────────────────────────────────────────────────────────
 export const generate = {
   document: (id) => request('POST', `/generate/${id}`),
 };
 
-// ─── REVISIONS ────────────────────────────────────────────────────────────────
 export const revisions = {
   list:         (id)               => request('GET',    `/projects/${id}/revisions`),
   create:       (id, body)         => request('POST',   `/projects/${id}/revisions`, body),
@@ -78,7 +66,6 @@ export const revisions = {
   clearMarks:   (id, code)         => request('DELETE', `/projects/${id}/clausemarks`, { revisionCode: code }),
 };
 
-// ─── SECTION REVIEWS ──────────────────────────────────────────────────────────
 export const reviews = {
   getAll:   (projectId)            => request('GET',    `/projects/${projectId}/reviews`),
   mark:     (projectId, sectionId) => request('POST',   `/projects/${projectId}/reviews/${sectionId}`),
@@ -86,12 +73,11 @@ export const reviews = {
   clearAll: (projectId)            => request('DELETE', `/projects/${projectId}/reviews`),
 };
 
-// ─── APPROVAL WORKFLOW ────────────────────────────────────────────────────────
 export const approvals = {
-  // Approver's view
-  getPending:   ()                   => request('GET',    '/approvals/pending'),
-  getReviewers: ()                   => request('GET',    '/approvals/reviewers'),
-
+  // All users list (for checker/approver picker — any auth user)
+  getUsers:   ()                     => request('GET',    '/approvals/users'),
+  // Approver's pending list
+  getPending: ()                     => request('GET',    '/approvals/pending'),
   // Per project
   getStatus:  (projectId)            => request('GET',    `/projects/${projectId}/approvals`),
   submit:     (projectId, approverId)=> request('POST',   `/projects/${projectId}/approvals`, { approverId }),
@@ -100,27 +86,25 @@ export const approvals = {
   reject:     (projectId, comments)  => request('POST',   `/projects/${projectId}/approvals/reject`, { comments }),
 };
 
-// ─── STANDARDS REFERENCE ──────────────────────────────────────────────────────
 export const standards = {
   getByHint: (hint) => request('GET', `/standards?hint=${encodeURIComponent(hint)}`),
 };
 
-// ─── ADMIN ────────────────────────────────────────────────────────────────────
 export const admin = {
-  getUsers:    ()           => request('GET',    '/admin/users'),
-  createUser:  (body)       => request('POST',   '/admin/users', body),
-  updateUser:  (id, body)   => request('PUT',    `/admin/users/${id}`, body),
-  deleteUser:  (id)         => request('DELETE', `/admin/users/${id}`),
-  getStats:    ()           => request('GET',    '/admin/stats'),
-  getSections:   ()                => request('GET',  '/admin/sections'),
-  updateSection: (id, body)        => request('PUT',  `/admin/sections/${id}`, body),
-  createField:   (sectionId, body) => request('POST', `/admin/sections/${sectionId}/fields`, body),
-  getFields:     ()           => request('GET',    '/admin/fields'),
-  updateField:   (id, body)   => request('PUT',    `/admin/fields/${id}`, body),
-  deleteField:   (id)         => request('DELETE', `/admin/fields/${id}`),
-  getGenerationLogs: ()       => request('GET',    '/admin/generation-logs'),
-  getStandards:    (hint)     => request('GET',    `/admin/standards${hint ? `?hint=${encodeURIComponent(hint)}` : ''}`),
-  createStandard:  (body)     => request('POST',   '/admin/standards', body),
-  updateStandard:  (id, b)    => request('PUT',    `/admin/standards/${id}`, b),
-  deleteStandard:  (id)       => request('DELETE', `/admin/standards/${id}`),
+  getUsers:          ()           => request('GET',    '/admin/users'),
+  createUser:        (body)       => request('POST',   '/admin/users', body),
+  updateUser:        (id, body)   => request('PUT',    `/admin/users/${id}`, body),
+  deleteUser:        (id)         => request('DELETE', `/admin/users/${id}`),
+  getStats:          ()           => request('GET',    '/admin/stats'),
+  getSections:       ()                => request('GET',  '/admin/sections'),
+  updateSection:     (id, body)        => request('PUT',  `/admin/sections/${id}`, body),
+  createField:       (sectionId, body) => request('POST', `/admin/sections/${sectionId}/fields`, body),
+  getFields:         ()           => request('GET',    '/admin/fields'),
+  updateField:       (id, body)   => request('PUT',    `/admin/fields/${id}`, body),
+  deleteField:       (id)         => request('DELETE', `/admin/fields/${id}`),
+  getGenerationLogs: ()           => request('GET',    '/admin/generation-logs'),
+  getStandards:      (hint)       => request('GET',    `/admin/standards${hint ? `?hint=${encodeURIComponent(hint)}` : ''}`),
+  createStandard:    (body)       => request('POST',   '/admin/standards', body),
+  updateStandard:    (id, b)      => request('PUT',    `/admin/standards/${id}`, b),
+  deleteStandard:    (id)         => request('DELETE', `/admin/standards/${id}`),
 };

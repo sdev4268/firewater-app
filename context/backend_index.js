@@ -16,11 +16,7 @@ const approvalsRouter = require('./routes/approvals');
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
-// ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
-app.use(cors({
-  origin:      process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true,
-}));
+app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173', credentials: true }));
 app.use(express.json());
 
 // ─── API ROUTES ───────────────────────────────────────────────────────────────
@@ -33,35 +29,24 @@ app.use('/api/generate',  generateRoutes);
 app.use('/api/admin',     adminRoutes);
 app.use('/api/standards', standardsRoutes);
 
-// Approval routes — mounted at both:
-//   /api/approvals/pending, /api/approvals/reviewers  (standalone)
-//   /api/projects/:id/approvals/...                   (project sub-routes)
+// Approval routes:
+//   /api/approvals/pending, /api/approvals/users  (standalone)
+//   /api/projects/:id/approvals/*                 (project sub-routes via /api prefix)
 app.use('/api/approvals', approvalsRouter);
-app.use('/api',           approvalsRouter);  // catches /api/projects/:id/approvals/*
+app.use('/api',           approvalsRouter);
 
-// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-// ─── SPA STATIC SERVING ───────────────────────────────────────────────────────
 if (process.env.SERVE_STATIC === 'true') {
   const staticDir = path.join(__dirname, 'public');
   app.use(express.static(staticDir));
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(staticDir, 'index.html'));
-  });
+  app.get('*', (req, res) => res.sendFile(path.join(staticDir, 'index.html')));
 }
 
 if (process.env.SERVE_STATIC !== 'true') {
   app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 }
 
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: 'Internal server error' });
-});
+app.use((err, req, res, next) => { console.error(err.stack); res.status(500).json({ error: 'Internal server error' }); });
 
-app.listen(PORT, () => {
-  console.log(`🔥 Firewater API running on http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`🔥 Firewater API running on http://localhost:${PORT}`));

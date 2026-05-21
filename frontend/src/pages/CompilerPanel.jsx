@@ -29,7 +29,7 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 const ZOOM_STEPS = [0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.4];
 const ZOOM_DEFAULT = 3; // index → 1.0
 
-const USER_TOGGLE_IDS = new Set([46, 461, 424, 425]);
+// Section visibility driven by isEnabled flag from tree endpoint (Phase 2)
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -72,11 +72,9 @@ function flattenTree(nodes, depth = 0, acc = []) {
 }
 
 /** Check if a section is visible given enabledToggleIds. */
-function isSectionVisible(sec, enabledToggleIds) {
-  if (sec.visibilityRule === 'USER_TOGGLE') {
-    return enabledToggleIds.has(sec.id);
-  }
-  return true;
+/** Section is visible if isEnabled is not explicitly false (tree endpoint sets this). */
+function isSectionVisible(sec) {
+  return sec.isEnabled !== false;
 }
 
 // ─── STYLES ──────────────────────────────────────────────────────────────────
@@ -358,10 +356,10 @@ export default function CompilerPanel({ treeData, fieldMeta, allFieldValues, liv
   }
 
   // Recursively render sections
-  function renderSections(nodes, depth = 0, enabledIds) {
+  function renderSections(nodes, depth = 0) {
     const output = [];
     for (const sec of nodes) {
-      if (!isSectionVisible(sec, enabledIds)) continue;
+      if (!isSectionVisible(sec)) continue;
 
       output.push(
         <div
@@ -378,7 +376,7 @@ export default function CompilerPanel({ treeData, fieldMeta, allFieldValues, liv
       );
 
       if (sec.children?.length) {
-        output.push(...renderSections(sec.children, depth + 1, enabledIds));
+        output.push(...renderSections(sec.children, depth + 1));
       }
 
       if (depth === 0) {
@@ -399,7 +397,6 @@ export default function CompilerPanel({ treeData, fieldMeta, allFieldValues, liv
     );
   }
 
-  const enabledIds  = new Set(treeData.enabledToggleIds ?? []);
   const sections    = treeData.sections ?? [];
   const projectName = fieldMeta?.find(f => f.fieldKey === 'project_short_name')?.resolvedValue || '';
   const docNum      = fieldMeta?.find(f => f.fieldKey === 'document_number')?.resolvedValue   || '';
@@ -442,7 +439,7 @@ export default function CompilerPanel({ treeData, fieldMeta, allFieldValues, liv
         {/* Sections */}
         {sections.length === 0
           ? <div style={{ color: C.muted, fontFamily: 'system-ui', textAlign: 'center', marginTop: '40px' }}>No sections available for this project type.</div>
-          : renderSections(sections, 0, enabledIds)
+          : renderSections(sections, 0)
         }
       </div>
     </div>
