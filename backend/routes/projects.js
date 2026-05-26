@@ -108,10 +108,13 @@ router.get('/:id', requireAuth, async (req, res) => {
 
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
-    // Engineers can only access their own projects
-    if (req.user.role !== 'ADMIN' && project.createdById !== req.user.id) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
+    // Engineers can access their own projects + projects where they are checker or approver
+	if (req.user.role !== 'ADMIN' 
+  	&& project.createdById !== req.user.id
+  	&& project.checkerId   !== req.user.id
+  	&& project.approverId  !== req.user.id) {
+  	return res.status(403).json({ error: 'Access denied' });
+}
 
     res.json(project);
   } catch (err) {
