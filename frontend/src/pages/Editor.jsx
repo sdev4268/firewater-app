@@ -13,7 +13,7 @@ import RevisionManager from './RevisionManager';
 import CompilerPanel   from './CompilerPanel';
 
 // ─── Generate (raw fetch — needs blob) ───────────────────────────────────────
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 async function generateDocument(projectId, fmt = 'docx') {
   const token = localStorage.getItem('fw_token');
   const res = await fetch(`${API_BASE}/generate/${projectId}?fmt=${fmt}`, {
